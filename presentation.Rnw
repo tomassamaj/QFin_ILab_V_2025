@@ -1,0 +1,404 @@
+\documentclass[t]{beamer}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{booktabs} % For better tables
+\usepackage[absolute,overlay]{textpos}
+\usepackage{multirow}
+\usepackage[table]{xcolor} % for color backgrounds
+\usepackage{array}
+\setbeamertemplate{itemize item}[circle]
+\setbeamertemplate{itemize subitem}[square]
+\setbeamertemplate{section in toc}[ball unnumbered]
+\setbeamertemplate{subsection in toc}[circle]
+\usepackage{amsmath,amsthm}
+\usepackage{Sweave} % Required for Rnw files
+
+\usetheme{Dresden}
+\setbeamertemplate{headline}{
+  \leavevmode%
+  \hbox{%
+    \begin{beamercolorbox}[wd=\paperwidth,ht=2.5ex,dp=1ex,left]{section in head/foot}
+      \hspace*{1em}\insertsection
+    \end{beamercolorbox}%
+  }
+}
+
+\addtobeamertemplate{frametitle}{}{%
+    \begin{textblock*}{1cm}(1.11\textwidth,1.105\textheight)
+        \color{white}\tiny\insertframenumber{} / \inserttotalframenumber
+    \end{textblock*}
+}
+
+
+% --- Presentation information ---
+\title{Replication: Factor Momentum}
+\subtitle{Based on Arnott, Clements, Kalesnik, Linnainmaa (2021)}
+\author{Your Name/Group Name} % <<<--- CHANGE THIS
+\institute[WU PMP Vienna]{Portfolio Management Program \\ WU Vienna} % <<<--- Adjust if needed
+\date{\today} % Or set a specific date
+
+\begin{document}
+
+% --- Title Frame (Using a generic background, replace Picture 3.png if needed) ---
+{
+% \usebackgroundtemplate{\includegraphics[width=\paperwidth,height=\paperheight]{Picture 3.png}} % Uncomment if you have the image
+\begin{frame}[plain]
+    \titlepage % Use standard title page layout
+\end{frame}
+}
+
+% --- Table of Contents ---
+\begin{frame}{Table of Contents}
+    \tableofcontents
+\end{frame}
+
+% --- Setup Chunk (Hidden) ---
+<<setup, include=FALSE>>=
+# --- 0. Load Required Libraries ---
+# Data manipulation
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+# Fama-French data
+library(frenchdata)
+# Plotting
+library(ggplot2)
+library(scales)
+library(corrplot)
+library(RColorBrewer)
+
+# --- 1. Load and Prepare Factor/Theme Data ---
+# Define start and end dates for analysis
+start_date <- ymd("1963-07-01") # Match factor data availability
+end_date <- ymd("2024-12-31")   # Match factor data availability
+
+# Load factor returns from CSV (Ensure these files are in the working directory)
+# Add error handling for file loading
+tryCatch({
+  all_factors_monthly_vw_cap <- read.csv("[usa]_[all_factors]_[monthly]_[vw_cap].csv")
+  all_factors_wide <- all_factors_monthly_vw_cap %>%
+    select(date, name, ret) %>%
+    mutate(date = ymd(date)) %>%
+    filter(date >= start_date & date <= end_date) %>%
+    pivot_wider(names_from = name, values_from = ret)
+}, error = function(e) {
+  stop("Error loading or processing [usa]_[all_factors]_[monthly]_[vw_cap].csv. Check file path and format.\n", e)
+})
+
+tryCatch({
+  all_themes_monthly_vw_cap <- read.csv("[usa]_[all_themes]_[monthly]_[vw_cap].csv")
+  all_themes_wide <- all_themes_monthly_vw_cap %>%
+    select(date, name, ret) %>%
+    mutate(date = ymd(date)) %>%
+    filter(date >= start_date & date <= end_date) %>%
+    pivot_wider(names_from = name, values_from = ret)
+}, error = function(e) {
+  stop("Error loading or processing [usa]_[all_themes]_[monthly]_[vw_cap].csv. Check file path and format.\n", e)
+})
+
+
+# Merge themes and factors
+merged_factors <- inner_join(all_themes_wide, all_factors_wide, by = "date")
+
+# Load industry names (Ensure this file is in the working directory)
+tryCatch({
+  ind_ports <- read.csv("17_Industry_Portfolios.csv")
+}, error = function(e) {
+  stop("Error loading 17_Industry_Portfolios.csv. Check file path and format.\n", e)
+})
+
+
+# --- 2. Load and Prepare Fama-French Industry Data ---
+industry_names <- ind_ports[7:23, 1]
+
+# Add error handling for data download
+ff_17_industry_monthly_raw <- NULL
+tryCatch({
+    ff_17_industry_monthly_raw <- download_french_data("17 Industry Portfolios")
+}, error = function(e) {
+    stop("Failed to download Fama-French 17 Industry data. Check internet connection or library.\n", e)
+})
+
+ff_17_industry_monthly <- ff_17_industry_monthly_raw$subsets$data[[1]] |>
+  mutate(
+    date = floor_date(ymd(str_c(date, "01")), "month"),
+    across(all_of(industry_names), ~ as.numeric(.) / 100),
+    .keep = "none"
+  ) |>
+  rename_with(str_to_lower) |>
+  filter(date >= start_date & date <= end_date) |>
+  mutate(date = ceiling_date(date, "month") - days(1))
+
+# --- 3. Merge All Data ---
+final_merged <- inner_join(ff_17_industry_monthly, merged_factors, by = "date")
+
+# --- 4. Rename Factors to Readable Names ---
+factor_rename_map <- c(
+  "Size_SMB" = "market_equity", "Book_to_Market_HML" = "be_me",
+  "Operating_Profitability_RMW" = "ope_be", "Asset_Growth_CMA" = "at_gr1",
+  "Long_Term_Reversals_LTREV" = "ret_60_12", "Residual_Variance_RVAR" = "ivol_ff3_21d", # Adjust if 'ivol_ff3_21d' is not the correct name in your data
+  "Quality_Minus_Junk_QMJ" = "qmj", "Low_Beta_BAB" = "betabab_1260d",
+  "Amihud_Illiquidity" = "ami_126d", "Firm_Age" = "age",
+  "Nominal_Price" = "prc", "High_Volume_Premium" = "dolvol_126d",
+  "Gross_Profitability" = "gp_at", "Return_on_Equity" = "ni_be",
+  "Return_on_Assets" = "niq_at", "Profit_Margin" = "ebit_sale",
+  "Change_in_Asset_Turnover" = "at_turnover",
+  "Accruals_Factor" = "oaccruals_at", "Net_Operating_Assets" = "noa_at",
+  "Net_Working_Capital_Changes" = "cowc_gr1a", "Cash_Flow_to_Price" = "ocf_me",
+  "Earnings_to_Price" = "ni_me", "Enterprise_Multiple" = "ebitda_mev",
+  "Sales_to_Price" = "sale_me",
+  "Growth_in_Inventory" = "inv_gr1", "Sales_Growth" = "sale_gr1",
+  "Growth_in_Sales_Inventory" = "dsale_dinv", "Abnormal_Investment" = "capex_abn",
+  "CAPX_Growth_Rate" = "capx_gr1",
+  "Debt_Issuance_Factor" = "dbnetis_at", "Leverage_Factor" = "at_be",
+  "One_Year_Share_Issuance" = "chcsho_12m", "Total_External_Financing" = "netis_at",
+  "Ohlson_O_Score" = "o_score", "Altman_Z_Score" = "z_score",
+  "Piotroski_F_Score" = "f_score"
+)
+final_merged_renamed <- final_merged %>% rename(any_of(factor_rename_map))
+
+# --- 5. Define Columns for Analysis ---
+industry_cols <- str_to_lower(industry_names)
+# Ensure the renamed factor columns actually exist before using them
+renamed_factor_cols <- intersect(names(factor_rename_map), colnames(final_merged_renamed))
+# Ensure theme columns actually exist
+theme_cols <- intersect(colnames(all_themes_wide)[-1], colnames(final_merged_renamed))
+
+# --- 6. Function to Calculate 1-Month Momentum Returns ---
+calculate_momentum <- function(df, target_cols, strategy_name) {
+   if (length(target_cols) < 2) {
+     warning(paste("Skipping momentum for", strategy_name, "- less than 2 cols provided."))
+     return(NULL)
+   }
+   target_cols_exist <- intersect(target_cols, colnames(df))
+    if (length(target_cols_exist) < 2) {
+     warning(paste("Skipping momentum for", strategy_name, "- less than 2 valid cols found in df."))
+     return(NULL)
+   }
+   # Check for columns that contain ONLY NAs after filtering+lagging
+    check_df <- df %>% select(all_of(target_cols_exist)) %>% filter(complete.cases(.))
+    if(nrow(check_df) < 2) { # Need at least 2 rows with complete data for lag
+        warning(paste("Skipping momentum for", strategy_name, "- not enough non-NA rows."))
+        return(NULL)
+    }
+    valid_cols_check <- check_df %>% summarise(across(everything(), ~!all(is.na(.)))) %>% pivot_longer(everything()) %>% filter(value) %>% pull(name)
+
+   if (length(valid_cols_check) < 2) {
+       warning(paste("Skipping momentum for", strategy_name, "- less than 2 cols with actual data after NA removal."))
+       return(NULL)
+   }
+    target_cols_final <- valid_cols_check
+
+   momentum_df <- df %>%
+     select(date, all_of(target_cols_final)) %>%
+     arrange(date) %>%
+     mutate(across(all_of(target_cols_final), lag, .names = "{.col}_lag1")) %>%
+     filter(row_number() > 1) %>% # Remove first row where lag is NA
+     rowwise() %>%
+     # Calculate median only if there are non-NA values
+     mutate(median_lag1_ret = {
+         vals <- c_across(ends_with("_lag1"));
+         if(all(is.na(vals))) NA else median(vals, na.rm = TRUE)
+         }) %>%
+     ungroup() %>%
+     # Proceed only if median could be calculated
+     filter(!is.na(median_lag1_ret)) %>%
+     mutate(across(ends_with("_lag1"),
+                   ~ case_when(!is.na(.) & . > median_lag1_ret ~ 1,
+                               !is.na(.) & . <= median_lag1_ret ~ -1, TRUE ~ 0), # Assign 0 if NA or median is NA
+                   .names = "{sub('_lag1', '_pos', .col)}" )) %>%
+     rowwise() %>%
+     mutate( n_long = sum(c_across(ends_with("_pos")) == 1),
+             n_short = sum(c_across(ends_with("_pos")) == -1) ) %>%
+     ungroup() %>%
+     mutate(across(ends_with("_pos"),
+                   ~ case_when( . == 1 & n_long > 0 ~ 1 / n_long,
+                                . == -1 & n_short > 0 ~ 1 / n_short, TRUE ~ 0),
+                   .names = "{sub('_pos', '_wgt', .col)}" )) %>%
+     rowwise() %>%
+     mutate( momentum_return = sum( c_across(ends_with("_pos")) *
+                                    c_across(ends_with("_wgt")) *
+                                    c_across(all_of(target_cols_final)), na.rm = TRUE)) %>%
+     ungroup() %>%
+     select(date, momentum_return) %>%
+     mutate(strategy_type = strategy_name)
+   return(momentum_df)
+}
+
+
+# --- 7. Calculate Momentum Series ---
+industry_momentum <- calculate_momentum(final_merged_renamed, industry_cols, "Industry Momentum")
+factor_momentum <- calculate_momentum(final_merged_renamed, renamed_factor_cols, "Factor Momentum")
+
+# --- 8. Combine for Plotting ---
+combined_momentum <- NULL # Initialize
+if (!is.null(industry_momentum) && !is.null(factor_momentum) && nrow(industry_momentum) > 0 && nrow(factor_momentum) > 0) {
+  # Ensure dates align before combining
+  common_dates <- inner_join(distinct(industry_momentum, date), distinct(factor_momentum, date), by = "date")
+  common_start_date <- min(common_dates$date)
+
+  combined_momentum <- bind_rows(
+        industry_momentum %>% filter(date %in% common_dates$date),
+        factor_momentum %>% filter(date %in% common_dates$date)
+        ) %>%
+    filter(date >= common_start_date) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    # Ensure returns are numeric and handle potential NAs before cumprod
+    mutate(momentum_return = as.numeric(momentum_return),
+           momentum_return = if_else(is.na(momentum_return), 0, momentum_return), # Replace NA returns with 0 for cumprod
+           cumulative_return_log = cumprod(1 + momentum_return)) %>%
+    ungroup()
+} else {
+    # Print specific reasons if momentum calculation failed
+    if(is.null(industry_momentum) || nrow(industry_momentum) == 0) print("Industry momentum calculation failed or returned no data.")
+    if(is.null(factor_momentum) || nrow(factor_momentum) == 0) print("Factor momentum calculation failed or returned no data.")
+}
+
+
+# --- 9. Data for Correlation Plot ---
+factor_data_for_corr <- final_merged_renamed %>%
+  select(any_of(renamed_factor_cols)) %>%
+  na.omit()
+cor_matrix <- NULL # Initialize
+if (ncol(factor_data_for_corr) >= 2) {
+  cor_matrix <- cor(factor_data_for_corr)
+} else {
+    print("Not enough factor columns with complete, non-NA data to calculate correlation matrix.")
+}
+@
+
+% --- Section: Replication Results ---
+\section{Replication Results}
+
+\begin{frame}{Outline}
+    \tableofcontents[currentsection,hideallsubsections]
+\end{frame}
+
+\begin{frame}{Factor vs. Industry Momentum Performance}
+\textbf{Methodology:}
+% Corrected itemize environment
+\begin{itemize}
+    \item Implement 1-month formation, 1-month holding momentum strategy.
+    \item Applied to 17 Fama-French industry portfolios and selected JKP factors.
+    \item Long assets above median prior return, short assets below median.
+    \item Equal-weighted within long/short legs, rebalanced monthly.
+    \item Sample: July 1963 - December 2024 (USA Data).
+\end{itemize}
+
+\vspace{0.5cm} % Add some vertical space
+
+\end{frame}
+
+\begin{frame}
+
+<<cum_ret_plot, echo=FALSE, fig.width=7, fig.height=4.5, fig.cap="Cumulative Performance (Log Scale), July 1963 - Dec 2020", fig.align='center'>>=
+# Check if combined_momentum data exists and has rows
+if (!is.null(combined_momentum) && nrow(combined_momentum) > 0) {
+ ggplot(combined_momentum, aes(x = date, y = cumulative_return_log, color = strategy_type)) +
+    geom_line(linewidth = 1) +
+    # Ensure y-axis starts slightly above 0 for log scale if needed, handle potential negative cumulative values if returns are large negatives
+    scale_y_log10(breaks = scales::log_breaks(n = 8),
+                  labels = scales::label_number(accuracy = 0.1) # Changed from percent
+                  ) +
+    scale_color_manual(values = c("Industry Momentum" = "black", "Factor Momentum" = "blue")) +
+    labs(subtitle = "Value of 1 dollar invested (Log Scale)", # Escaped dollar sign
+         x = "Year", y = "Cumulative Performance (of  one dollar)", color = "Strategy") + # Escaped dollar sign
+    theme_minimal(base_size = 10) + # Smaller base size for Beamer
+    theme(legend.position = "bottom", # Move legend to bottom
+          plot.subtitle = element_text(hjust = 0.5))
+} else {
+  # Create a blank plot or message if data is missing
+  plot(NULL, xlim=c(0,1), ylim=c(0,1), ann=FALSE, axes=FALSE)
+  text(0.5, 0.5, "Momentum data could not be generated.", cex=1.2)
+}
+@
+
+\end{frame}
+
+\begin{frame}{Factor Correlation Heatmap}
+\textbf{Analysis:}
+\begin{itemize}
+    \item Correlation calculated among the selected JKP factors used in the factor momentum strategy.
+    \item Helps understand the relationships between the factors being timed.
+\end{itemize}
+
+\vspace{0.5cm} % Add some vertical space
+\end{frame}
+
+
+\begin{frame}
+<<corr_heatmap1, echo=FALSE, fig.width=7, fig.height=5, fig.cap="Upper Triangular Correlation Heatmap of Selected JKP Factors", fig.align='center'>>=
+# Check if cor_matrix exists and is valid
+if (!is.null(cor_matrix) && is.matrix(cor_matrix) && ncol(cor_matrix) >= 2) {
+  col_palette <- colorRampPalette(brewer.pal(n = 11, name = "BrBG"))(200)
+
+  # Use par(mar=...) before corrplot and reset after for better margin control in Rnw/knitr
+  old_mar <- par("mar") # Store old margins
+  par(mar = c(0,0,2,0)) # bottom, left, top, right margins - allow more space at top for title
+  corrplot(cor_matrix,
+           method = "color", type = "upper", order = "original",
+           tl.col = "black", tl.srt = 45,
+           tl.cex = 0.5, number.cex = 0.4, col = col_palette,
+           diag = FALSE, cl.cex = 0.4,
+           title = "Upper Triangular Correlation Heatmap" # Add title directly
+          )
+   # title("Upper Triangular Correlation Heatmap", line = 0.5) # Use title argument instead
+   par(mar = old_mar) # Reset to default margins
+
+} else {
+  plot(NULL, xlim=c(0,1), ylim=c(0,1), ann=FALSE, axes=FALSE)
+  text(0.5, 0.5, "Correlation matrix could not be generated.", cex=1.2)
+}
+@
+
+\end{frame}
+
+
+\begin{frame}
+<<corr_heatmap, echo=FALSE, fig.width=7, fig.height=5, fig.cap="Upper Triangular Correlation Heatmap of Selected JKP Factors", fig.align='center'>>=
+# Check if cor_matrix exists and is valid
+if (!is.null(cor_matrix) && is.matrix(cor_matrix) && ncol(cor_matrix) >= 2) {
+  col_palette <- colorRampPalette(brewer.pal(n = 11, name = "BrBG"))(200)
+
+  # Use par(mar=...) before corrplot and reset after for better margin control in Rnw/knitr
+  old_mar <- par("mar") # Store old margins
+  par(mar = c(0,0,2,0)) # bottom, left, top, right margins - allow more space at top for title
+  corrplot(cor_matrix,
+           method = "color", type = "upper", order = "original",
+           addCoef.col = "black", tl.col = "black", tl.srt = 45,
+           tl.cex = 0.5, number.cex = 0.4, col = col_palette,
+           diag = FALSE, cl.cex = 0.4,
+           title = "Upper Triangular Correlation Heatmap" # Add title directly
+          )
+   # title("Upper Triangular Correlation Heatmap", line = 0.5) # Use title argument instead
+   par(mar = old_mar) # Reset to default margins
+
+} else {
+  plot(NULL, xlim=c(0,1), ylim=c(0,1), ann=FALSE, axes=FALSE)
+  text(0.5, 0.5, "Correlation matrix could not be generated.", cex=1.2)
+}
+@
+
+\end{frame}
+
+\begin{frame}{Key Findings \& Conclusion}
+% Corrected itemize environment
+\begin{itemize}
+    \item \textbf{Replication Findings:}
+        \begin{itemize}
+            \item Both industry and factor momentum strategies generated positive returns over the 1963-2020 period.
+            \item The cumulative performance plot visually suggests factor momentum was significantly stronger and more persistent, especially in later years, mirroring Figure 1 in Arnott et al. (2021).
+            \item Factor correlations vary, indicating diversification benefits within the factor universe itself.
+        \end{itemize}
+    \item \textbf{Connection to Arnott et al. (2021):}
+        \begin{itemize}
+            \item The paper argues that factor momentum \textit{subsumes} industry momentum. While this R code doesn't perform the formal spanning regressions from the paper (Table 4), the performance difference is suggestive.
+            \item Arnott et al. show that momentum concentrates in high-eigenvalue principal component factors derived from industry-neutral factors. Our analysis uses the raw JKP factors directly.
+        \end{itemize}
+     \item \textbf{Conclusion:} The results support the presence of short-term momentum in both industries and factors. The superior performance of the factor momentum strategy aligns with the central thesis of Arnott et al. (2021) that factor dynamics are the primary driver. % Removed emoji
+\end{itemize}
+
+\end{frame}
+
+\end{document}
