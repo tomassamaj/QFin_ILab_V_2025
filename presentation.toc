@@ -1,1 +1,6 @@
-\beamer@sectionintoc {1}{Replication Results}{3}{0}{1}
+\beamer@sectionintoc {1}{Papers and Context}{3}{0}{1}
+\beamer@sectionintoc {2}{Data}{6}{0}{2}
+\beamer@sectionintoc {3}{Replication Methodology}{8}{0}{3}
+\beamer@sectionintoc {4}{Replication Results}{10}{0}{4}
+\beamer@sectionintoc {5}{Factor Correlation Analysis}{14}{0}{5}
+\beamer@sectionintoc {6}{Findings and Conclusion}{18}{0}{6}

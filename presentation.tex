@@ -146,7 +146,7 @@
 \begin{frame}{Data Description}
 \textbf{Datasets Used:}
 \begin{itemize}
-    \item \textbf{Fama–French 17 Industry Portfolios:} Monthly excess returns (July 1963–Dec 2020).
+    \item \textbf{Fama–French 17 Industry Portfolios:} Monthly excess returns (July 1963–Dec 2024).
     \item \textbf{JKP Factors:} Cross-sectional factor returns (value, profitability, investment, quality, risk).
     \item \textbf{Thematic Factors:} Growth, leverage, volatility, and other economic themes.
 \end{itemize}
@@ -157,7 +157,7 @@
     \item Standardized names and applied readable labels.
 \end{itemize}
 
-\textbf{Final Sample:} July 1963 – December 2020 (U.S. market).
+\textbf{Final Sample:} July 1963 – December 2024 (U.S. market).
 \end{frame}
 
 % ============================
@@ -198,9 +198,20 @@
 \begin{knitrout}
 \definecolor{shadecolor}{rgb}{0.969, 0.969, 0.969}\color{fgcolor}
 \begin{figure}
-{\centering \includegraphics[width=\maxwidth]{figure/cum_ret_plot-1} }
-\caption[Cumulative Performance (Log Scale), July 1963 - Dec 2020]{Cumulative Performance (Log Scale), July 1963 - Dec 2020}
+{\centering \includegraphics[width=\maxwidth]{figure/cum_ret_plot} }
+\caption[Cumulative Performance (Log Scale), July 1963 - Dec 2024]{Cumulative Performance (Log Scale), July 1963 - Dec 2024}
 \label{fig:cum_ret_plot}
+\end{figure}
+\end{knitrout}
+\end{frame}
+
+\begin{frame}
+\begin{knitrout}
+\definecolor{shadecolor}{rgb}{0.969, 0.969, 0.969}\color{fgcolor}
+\begin{figure}
+{\centering \includegraphics[width=\maxwidth]{figure/cum_ret_plot_vola_scaled} }
+\caption[Cumulative Performance Vola Scaled (Log Scale), July 1963 - Dec 2024]{Cumulative Performance Vola Scaled (Log Scale), July 1963 - Dec 2024}
+\label{fig:cum_ret_plot_vola_scaled}
 \end{figure}
 \end{knitrout}
 \end{frame}
@@ -272,24 +283,90 @@
     \tableofcontents[currentsection, hideallsubsections]
 \end{frame}
 
-\begin{frame}{Key Findings \& Conclusion}
+\begin{frame}{Key Findings and Conclusion}
 \begin{itemize}
     \item \textbf{Replication Findings:}
     \begin{itemize}
         \item Both industry and factor momentum strategies yield positive returns.
-        \item Factor momentum is stronger and more persistent—consistent with Arnott et al. (2023).
+        \item Factor momentum appears stronger and more persistent, aligning with findings in the literature.
+        \item The performance gap seems to widen in the extended sample period.
     \end{itemize}
     \item \textbf{Interpretation:}
     \begin{itemize}
-        \item Factor momentum \textit{subsumes} industry momentum.
-        \item Correlation analysis supports clusters of fundamental drivers.
-    \end{itemize}
-    \item \textbf{Conclusion:}
-    \begin{itemize}
-        \item Results confirm that short-term momentum is primarily driven by systematic factor dynamics.
+        \item Factor momentum seems to subsume industry momentum, as suggested in the literature.
+        \item \textbf{Correlation analysis identifies distinct clusters of fundamental drivers (e.g., Value, Profitability, Investment) suggesting systematic sources for factor momentum.}
     \end{itemize}
 \end{itemize}
 \end{frame}
+
+
+\begin{frame}{Key Findings and Conclusion 2}
+  \begin{itemize}
+    \item \textbf{Conclusion:}
+    \begin{itemize}
+        \item Preliminary results support the hypothesis that short-term momentum is primarily driven by systematic factor dynamics rather than purely industry-specific effects.
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+
+
+
+\begin{frame}{Next Steps: Refinement and Analysis}
+    \vspace{0.5cm}
+    \textbf{Deeper Analysis (Kickoff Goals):}
+    \begin{itemize}
+        \item \textbf{Factor Contribution Analysis:}
+            \begin{itemize}
+                \item Which factors drive the overall factor momentum return?
+                \item \textbf{Further analyze the contribution of the identified factor clusters (Value, Profitability, Investment etc.) from the correlation analysis.}
+            \end{itemize}
+        \item \textbf{Factor Regressions:}
+            \begin{itemize}
+                \item Run regressions of individual JKP factors against FF3 / FF5+UMD models as requested in kickoff.
+            \end{itemize}
+        \item \textbf{Asset Allocation Context:}
+            \begin{itemize}
+                \item Calculate basic stats (Sharpe, Volatility) for the replicated Factor Momentum strategy.
+                \item Identify the best strategies for potential inclusion in a broader asset allocation framework.
+                \item Assess correlation with a standard 60/40 portfolio.
+            \end{itemize}
+    \end{itemize}
+
+\end{frame}
+
+
+\begin{frame}{Questions and Discussion Points}
+
+    \textbf{Factor Set Alignment:}
+    \begin{itemize}
+        \item Our JKP dataset seems to align well, but we couldn't precisely match/find these factors from the RFS paper:
+            \begin{itemize}
+                \item \footnotesize Residual Variance, Sustainable Growth, Investment Growth Rate, Investment to Capital, Investment to Assets, Five-Year Share Issuance, Distress Risk, M/B Accruals.
+            \end{itemize}
+        \item Should we proceed with the current matched set (approx. 35 factors)? Does this significantly impact the replication?
+    \end{itemize}
+\end{frame}
+
+
+\begin{frame}{Sneak Peek: Factor Regression Example}
+
+    \textbf{Regression:} JKP `Book to Market HML` (Excess Return) FF3 Factors (MktRF + SMB + HML)
+
+    \vspace{0.5cm}
+    \textbf{Key Results:}
+    \begin{itemize}
+        \item \textbf{High HML Loading:} Coefficient on FF HML is 0.986 ($t = 36.8$), indicating the JKP factor strongly captures the standard value effect, as expected.
+        \item \textbf{Significant Alpha:} The intercept is -0.41 percent per month ($t = -5.21$), suggesting the JKP HML factor underperformed the FF3 model's prediction.
+        \item \textbf{SMB Exposure:} Significant negative loading on SMB (-0.108, t = -4.01), indicating a slight tilt towards larger stocks compared to the FF3 benchmark.
+        \item \textbf{Model Fit:} The FF3 factors explain approx. 67 percent of the variance (Adj. R-squared = 0.666).
+    \end{itemize}
+
+    \vspace{0.5cm}
+    \textit{Next step: Extend this analysis to all factors and additional models (FF5+UMD).}
+
+\end{frame}
+
 
 \begin{frame}[plain]
     \centering
