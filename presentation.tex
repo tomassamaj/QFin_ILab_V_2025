@@ -1,8 +1,8 @@
-\documentclass[t]{beamer}\usepackage[]{graphicx}\usepackage[table]{xcolor}
-% maxwidth is the original width if it is less than linewidth
-% otherwise use linewidth (to make sure the graphics do not exceed the margin)
+\documentclass[t]{beamer}
+\usepackage[]{graphicx}
+\usepackage[table]{xcolor}
 \makeatletter
-\def\maxwidth{ %
+\def\maxwidth{%
   \ifdim\Gin@nat@width>\linewidth
     \linewidth
   \else
@@ -33,7 +33,6 @@
  \fi\fi%
  \def\FrameCommand##1{\hskip\@totalleftmargin \hskip-\fboxsep
  \colorbox{shadecolor}{##1}\hskip-\fboxsep
-     % There is no \\@totalrightmargin, so:
      \hskip-\linewidth \hskip-\@totalleftmargin \hskip\columnwidth}%
  \MakeFramed {\advance\hsize-\width
    \@totalleftmargin\z@ \linewidth\hsize
@@ -43,24 +42,9 @@
 \makeatother
 
 \definecolor{shadecolor}{rgb}{.97, .97, .97}
-\definecolor{messagecolor}{rgb}{0, 0, 0}
-\definecolor{warningcolor}{rgb}{1, 0, 1}
-\definecolor{errorcolor}{rgb}{1, 0, 0}
-\newenvironment{knitrout}{}{} % an empty environment to be redefined in TeX
+\newenvironment{knitrout}{}{} 
 
-\usepackage{alltt}
-\usepackage{graphicx} % Required for inserting images
-\usepackage{booktabs} % For better tables
-\usepackage[absolute,overlay]{textpos}
-\usepackage{multirow}
-\usepackage[table]{xcolor} % for color backgrounds
-\usepackage{array}
-\setbeamertemplate{itemize item}[circle]
-\setbeamertemplate{itemize subitem}[square]
-\setbeamertemplate{section in toc}[ball unnumbered]
-\setbeamertemplate{subsection in toc}[circle]
-\usepackage{amsmath,amsthm}
-\usepackage{Sweave} % Required for Rnw files
+\usepackage{booktabs, textpos, multirow, array, amsmath, amsthm, Sweave}
 
 \usetheme{Dresden}
 \setbeamertemplate{headline}{
@@ -71,28 +55,25 @@
     \end{beamercolorbox}%
   }
 }
-
 \addtobeamertemplate{frametitle}{}{%
     \begin{textblock*}{1cm}(1.11\textwidth,1.105\textheight)
         \color{white}\tiny\insertframenumber{} / \inserttotalframenumber
     \end{textblock*}
 }
 
-
 % --- Presentation information ---
 \title{Replication: Factor Momentum}
-\subtitle{Based on Arnott, Clements, Kalesnik, Linnainmaa (2021)}
-\author{Your Name/Group Name} % <<<--- CHANGE THIS
-\institute[WU PMP Vienna]{Portfolio Management Program \\ WU Vienna} % <<<--- Adjust if needed
-\date{\today} % Or set a specific date
-\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
+\subtitle{Based on Arnott, Kalesnik, \& Linnainmaa (2023)}
+\author{Caterina Piancentini, Farkas Tallos, Giulio Iepure, Tomas Samaj}
+\institute[WU Vienna]{ZZ ILab \\ WU Vienna}
+\date{Term 2025/2026 -- ZZ QFin ILab Meeting 2}
+
 \begin{document}
 
-% --- Title Frame (Using a generic background, replace Picture 3.png if needed) ---
+% --- Title Frame ---
 {
-% \usebackgroundtemplate{\includegraphics[width=\paperwidth,height=\paperheight]{Picture 3.png}} % Uncomment if you have the image
 \begin{frame}[plain]
-    \titlepage % Use standard title page layout
+    \titlepage
 \end{frame}
 }
 
@@ -101,106 +82,223 @@
     \tableofcontents
 \end{frame}
 
-% --- Setup Chunk (Hidden) ---
+% ============================
+% SECTION 1: Papers and Context
+% ============================
+\section{Papers and Context}
 
+\begin{frame}{Arnott, Kalesnik \& Linnainmaa (2023) -- \textit{Factor Momentum}}
+\textbf{Main Idea:}
+\begin{itemize}
+    \item Extends momentum research to factor portfolios—showing that factor returns themselves exhibit momentum.
+    \item Finds that factor momentum \textbf{subsumes} industry momentum.
+    \item Uses principal component analysis to identify systematic sources of momentum.
+\end{itemize}
 
-% --- Section: Replication Results ---
+\textbf{Key Insight:}
+\begin{itemize}
+    \item Momentum is strongest in high-eigenvalue factors explaining most of cross-sectional returns.
+    \item Momentum arises from systematic components, not just stock-level trends.
+\end{itemize}
+
+\textbf{Relevance:} Our replication reproduces Appendix plots comparing factor and industry momentum.
+\end{frame}
+
+\begin{frame}{Ehsani \& Linnainmaa (2022) -- \textit{Factor Momentum and the Momentum Factor}}
+\textbf{Contribution:}
+\begin{itemize}
+    \item Shows that momentum in stock returns stems from momentum in factor returns.
+    \item Factors show strong autocorrelation: winners stay winners, losers stay losers.
+\end{itemize}
+
+\textbf{Interpretation:}
+\begin{itemize}
+    \item Momentum reflects timing of factor exposures, not a separate risk factor.
+    \item Complements Arnott et al. (2023) by providing theoretical grounding.
+\end{itemize}
+
+\textbf{Link:} Our replication validates these findings using Fama–French and JKP datasets.
+\end{frame}
+
+\begin{frame}{AQR Alternative Trends UCITS Fund (2025) -- \textit{Practical Application}}
+\textbf{Context:}
+\begin{itemize}
+    \item AQR’s trend-following fund applies cross-asset and factor momentum.
+    \item Combines price-based and fundamental trend signals across global assets.
+\end{itemize}
+
+\textbf{Performance (Q1 2025 Report):}
+\begin{itemize}
+    \item Annualized return: 11.9\%; Sharpe ratio: 0.76.
+    \item Low equity correlation (-0.20) and positive macro exposure.
+\end{itemize}
+\end{frame}
+
+% ============================
+% SECTION 2: Data
+% ============================
+\section{Data}
+
+\begin{frame}{Outline}
+    \tableofcontents[currentsection, hideallsubsections]
+\end{frame}
+
+\begin{frame}{Data Description}
+\textbf{Datasets Used:}
+\begin{itemize}
+    \item \textbf{Fama–French 17 Industry Portfolios:} Monthly excess returns (July 1963–Dec 2020).
+    \item \textbf{JKP Factors:} Cross-sectional factor returns (value, profitability, investment, quality, risk).
+    \item \textbf{Thematic Factors:} Growth, leverage, volatility, and other economic themes.
+\end{itemize}
+
+\textbf{Data Processing:}
+\begin{itemize}
+    \item Cleaned and aligned to a common monthly sample.
+    \item Standardized names and applied readable labels.
+\end{itemize}
+
+\textbf{Final Sample:} July 1963 – December 2020 (U.S. market).
+\end{frame}
+
+% ============================
+% SECTION 3: Replication Methodology
+% ============================
+\section{Replication Methodology}
+
+\begin{frame}{Outline}
+    \tableofcontents[currentsection, hideallsubsections]
+\end{frame}
+
+\begin{frame}{Replication Methodology}
+\textbf{Objective:} Replicate Arnott et al. (2023) Appendix figure comparing \textbf{Factor} vs. \textbf{Industry Momentum}.
+
+\textbf{Strategy:}
+\begin{enumerate}
+    \item For each month:
+    \begin{itemize}
+        \item Rank all assets by previous month’s return.
+        \item Go \textbf{long} the top half (winners), \textbf{short} the bottom half (losers).
+    \end{itemize}
+    \item Apply to Fama–French 17 industries and selected JKP factors.
+    \item Equal-weight portfolios; rebalance monthly.
+    \item Compute 1-month long–short return.
+\end{enumerate}
+\end{frame}
+
+% ============================
+% SECTION 4: Replication Results
+% ============================
 \section{Replication Results}
 
 \begin{frame}{Outline}
-    \tableofcontents[currentsection,hideallsubsections]
-\end{frame}
-
-\begin{frame}{Factor vs. Industry Momentum Performance}
-\textbf{Methodology:}
-% Corrected itemize environment
-\begin{itemize}
-    \item Implement 1-month formation, 1-month holding momentum strategy.
-    \item Applied to 17 Fama-French industry portfolios and selected JKP factors.
-    \item Long assets above median prior return, short assets below median.
-    \item Equal-weighted within long/short legs, rebalanced monthly.
-    \item Sample: July 1963 - December 2024 (USA Data).
-\end{itemize}
-
-\vspace{0.5cm} % Add some vertical space
-
+    \tableofcontents[currentsection, hideallsubsections]
 \end{frame}
 
 \begin{frame}
-
 \begin{knitrout}
-\definecolor{shadecolor}{rgb}{0.969, 0.969, 0.969}\color{fgcolor}\begin{figure}
-
-{\centering \includegraphics[width=\maxwidth]{figure/cum_ret_plot-1} 
-
-}
-
-\caption[Cumulative Performance (Log Scale), July 1963 - Dec 2020]{Cumulative Performance (Log Scale), July 1963 - Dec 2020}\label{fig:cum_ret_plot}
+\definecolor{shadecolor}{rgb}{0.969, 0.969, 0.969}\color{fgcolor}
+\begin{figure}
+{\centering \includegraphics[width=\maxwidth]{figure/cum_ret_plot-1} }
+\caption[Cumulative Performance (Log Scale), July 1963 - Dec 2020]{Cumulative Performance (Log Scale), July 1963 - Dec 2020}
+\label{fig:cum_ret_plot}
 \end{figure}
-
 \end{knitrout}
-
 \end{frame}
 
-\begin{frame}{Factor Correlation Heatmap}
+\begin{frame}{Arnott et al. (2023) Plot}
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.92\linewidth]{Actual_plot.png}
+    \caption{Industry vs. Factor vs. Industry-Neutral Factor Momentum (1965–2020).}
+\end{figure}
+\footnotesize
+\textbf{Source:} Arnott, Kalesnik, Linnainmaa (2023), \textit{RFS}, 36(8), 3034–3070.
+\end{frame}
+
+% ============================
+% SECTION 5: Factor Correlation Analysis
+% ============================
+\section{Factor Correlation Analysis}
+
+\begin{frame}{Outline}
+    \tableofcontents[currentsection, hideallsubsections]
+\end{frame}
+
+\begin{frame}{Factor Correlation Heatmap (Part 1)}
 \textbf{Analysis:}
 \begin{itemize}
-    \item Correlation calculated among the selected JKP factors used in the factor momentum strategy.
-    \item Helps understand the relationships between the factors being timed.
+    \item Correlation calculated among selected JKP factors.
+    \item Helps identify relationships between factors being timed.
+    \item \textbf{High correlations (dark green):}
+    \begin{itemize}
+        \item Strong among \textbf{profitability factors} — Gross Profitability, ROE, Profit Margin.
+        \item \textbf{Investment factors} (Asset Growth, CAPX Growth) also highly correlated.
+        \item Value-style factors moderately correlated with profitability.
+    \end{itemize}
+    \item Fundamental factors move together, reinforcing systematic momentum.
 \end{itemize}
-
-\vspace{0.5cm} % Add some vertical space
 \end{frame}
 
+\begin{frame}{Factor Correlation Heatmap (Part 2)}
+\textbf{Analysis (continued):}
+\begin{itemize}
+    \item \textbf{Low/negative correlations (brown areas):}
+    \begin{itemize}
+        \item Distress and volatility proxies (Ohlson O-Score, Altman Z-Score, Residual Variance) have weak or negative links with profitability/value.
+        \item Size (SMB) and momentum variables are largely orthogonal.
+    \end{itemize}
+    \item Indicates that some factors add \textbf{diversification} rather than reinforcement.
+    \item Overall: Factor momentum mainly comes from \textbf{clusters of correlated, fundamental drivers}.
+\end{itemize}
+\end{frame}
 
 \begin{frame}
 \begin{knitrout}
-\definecolor{shadecolor}{rgb}{0.969, 0.969, 0.969}\color{fgcolor}\begin{figure}
-
-{\centering \includegraphics[width=\maxwidth]{figure/corr_heatmap1-1} 
-
-}
-
-\caption[Upper Triangular Correlation Heatmap of Selected JKP Factors]{Upper Triangular Correlation Heatmap of Selected JKP Factors}\label{fig:corr_heatmap1}
+\definecolor{shadecolor}{rgb}{0.969, 0.969, 0.969}\color{fgcolor}
+\begin{figure}
+{\centering \includegraphics[width=\maxwidth]{figure/corr_heatmap1-1} }
+\caption[Upper Triangular Correlation Heatmap of Selected JKP Factors]{Upper Triangular Correlation Heatmap of Selected JKP Factors}
+\label{fig:corr_heatmap1}
 \end{figure}
-
 \end{knitrout}
-
 \end{frame}
 
+% ============================
+% SECTION 6: Findings and Conclusion
+% ============================
+\section{Findings and Conclusion}
 
-\begin{frame}
-\begin{knitrout}
-\definecolor{shadecolor}{rgb}{0.969, 0.969, 0.969}\color{fgcolor}\begin{figure}
-
-{\centering \includegraphics[width=\maxwidth]{figure/corr_heatmap-1} 
-
-}
-
-\caption[Upper Triangular Correlation Heatmap of Selected JKP Factors]{Upper Triangular Correlation Heatmap of Selected JKP Factors}\label{fig:corr_heatmap}
-\end{figure}
-
-\end{knitrout}
-
+\begin{frame}{Outline}
+    \tableofcontents[currentsection, hideallsubsections]
 \end{frame}
 
 \begin{frame}{Key Findings \& Conclusion}
-% Corrected itemize environment
 \begin{itemize}
     \item \textbf{Replication Findings:}
-        \begin{itemize}
-            \item Both industry and factor momentum strategies generated positive returns over the 1963-2020 period.
-            \item The cumulative performance plot visually suggests factor momentum was significantly stronger and more persistent, especially in later years, mirroring Figure 1 in Arnott et al. (2021).
-            \item Factor correlations vary, indicating diversification benefits within the factor universe itself.
-        \end{itemize}
-    \item \textbf{Connection to Arnott et al. (2021):}
-        \begin{itemize}
-            \item The paper argues that factor momentum \textit{subsumes} industry momentum. While this R code doesn't perform the formal spanning regressions from the paper (Table 4), the performance difference is suggestive.
-            \item Arnott et al. show that momentum concentrates in high-eigenvalue principal component factors derived from industry-neutral factors. Our analysis uses the raw JKP factors directly.
-        \end{itemize}
-     \item \textbf{Conclusion:} The results support the presence of short-term momentum in both industries and factors. The superior performance of the factor momentum strategy aligns with the central thesis of Arnott et al. (2021) that factor dynamics are the primary driver. % Removed emoji
+    \begin{itemize}
+        \item Both industry and factor momentum strategies yield positive returns.
+        \item Factor momentum is stronger and more persistent—consistent with Arnott et al. (2023).
+    \end{itemize}
+    \item \textbf{Interpretation:}
+    \begin{itemize}
+        \item Factor momentum \textit{subsumes} industry momentum.
+        \item Correlation analysis supports clusters of fundamental drivers.
+    \end{itemize}
+    \item \textbf{Conclusion:}
+    \begin{itemize}
+        \item Results confirm that short-term momentum is primarily driven by systematic factor dynamics.
+    \end{itemize}
 \end{itemize}
+\end{frame}
 
+\begin{frame}[plain]
+    \centering
+    \vspace{2cm}
+    {\Huge \textbf{Thank You}} \\[0.5cm]
+    \Large Questions or comments? \\[1cm]
+    \normalsize
+    \textit{Replication of Arnott, Kalesnik, \& Linnainmaa (2023)} \\
+    WU Vienna – ZZ QFin Lab 2025/26 
 \end{frame}
 
 \end{document}
