@@ -500,8 +500,8 @@ library(broom) # For tidying model output
 start_date_ff <- floor_date(min(final_merged_renamed$date), "month")
 end_date_ff <- ceiling_date(max(final_merged_renamed$date), "month") - days(1)
 
-ff_factors_monthly_raw <- download_french_data("Fama/French 3 Factors")
-ff_factors_monthly <- ff_factors_monthly_raw$subsets$data[[1]] |>
+ff3_factors_monthly_raw <- download_french_data("Fama/French 3 Factors")
+ff3_factors_monthly <- ff3_factors_monthly_raw$subsets$data[[1]] |>
   mutate(
     date = floor_date(ymd(str_c(date, "01")), "month"),
     across(c("Mkt-RF", SMB, HML, RF), ~ as.numeric(.) / 100),
@@ -519,7 +519,7 @@ jkp_factor_name <- "Book_to_Market_HML" # Make sure this matches a column name
 reg_data <- final_merged_renamed %>%
   select(date, all_of(jkp_factor_name)) %>%
   # Merge with FF3 factors
-  inner_join(ff_factors_monthly, by = "date") %>%
+  inner_join(ff3_factors_monthly, by = "date") %>%
   # Calculate excess return for the JKP factor
   mutate(Factor_Excess = .data[[jkp_factor_name]] - RF) %>%
   na.omit() # Remove rows with NAs that might interfere
@@ -546,3 +546,44 @@ print(glance_summary)
 # 1. All relevant JKP factors in 'renamed_factor_cols'.
 # 2. Different models (e.g., FF5 + UMD by adding CMA, RMW, UMD).
 # 3. Potentially regressing your calculated *factor momentum strategy* returns.
+
+
+
+
+
+
+################ ROUND 2 ####################
+
+factors_ff5_monthly_raw <- download_french_data("Fama/French 5 Factors (2x3)")
+
+factors_ff5_monthly <- factors_ff5_monthly_raw$subsets$data[[1]] |>
+  mutate(
+    date = floor_date(ymd(str_c(date, "01")), "month"),
+    across(c(RF, `Mkt-RF`, SMB, HML, RMW, CMA), ~as.numeric(.) / 100),
+    .keep = "none"
+  ) |>
+  rename_with(str_to_lower) |>
+  rename(mkt_excess = `mkt-rf`) |> 
+  filter(date >= start_date & date <= end_date)
+
+
+factors_mom_monthly_raw <- download_french_data("Momentum Factor (Mom)")
+
+factors_mom_monthly <- factors_mom_monthly_raw$subsets$data[[1]] |>
+  mutate(
+    date = floor_date(ymd(str_c(date, "01")), "month"),
+    across(c(Mom), ~as.numeric(.) / 100),
+    .keep = "none"
+  ) |>
+  rename_with(str_to_lower) |>
+  filter(date >= start_date & date <= end_date)
+
+
+# Merge FF5 and Momentum factors
+factors_ff5_mom_monthly <- inner_join(factors_ff5_monthly, factors_mom_monthly, by = "date")
+
+
+
+
+
+
