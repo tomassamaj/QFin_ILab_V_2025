@@ -582,7 +582,119 @@ factors_mom_monthly <- factors_mom_monthly_raw$subsets$data[[1]] |>
 # Merge FF5 and Momentum factors
 factors_ff5_mom_monthly <- inner_join(factors_ff5_monthly, factors_mom_monthly, by = "date")
 
+# --- 3. Run Regressions for All Factors ---
 
+# Continue from your provided line:
+all_reg_data <- final_merged_renamed %>%
+  select(date, all_of(renamed_factor_cols)) %>%
+  inner_join(ff3_factors_monthly, by = "date")
+
+cat("\n\n--- Running Full-Period FF3 Regressions ---\n")
+
+# --- 3. Loop, Run Regressions, and Print Results ---
+
+# Loop through each factor name in your list
+for (factor_name in renamed_factor_cols) {
+  
+  # --- A. Prepare Data for this Factor ---
+  regression_df <- all_reg_data %>%
+    # Calculate this factor's excess return (Factor - RF)
+    mutate(Factor_Excess = .data[[factor_name]] - RF) %>%
+    # Select only relevant columns and drop NAs
+    select(Factor_Excess, Mkt_RF, SMB, HML) %>%
+    na.omit()
+  
+  # --- B. Run Regression (if data exists) ---
+  if (nrow(regression_df) > 0) {
+    
+    # Run the linear model (FF3 Regression)
+    ff3_model <- lm(Factor_Excess ~ Mkt_RF + SMB + HML, data = regression_df)
+    
+    # Tidy the model output into a clean data frame
+    # and select/rename columns at the same time
+    factor_results <- tidy(ff3_model) %>%
+      select(term, estimate, p.value) %>%
+      mutate(term = recode(term, `(Intercept)` = "Alpha"))
+    
+    # --- C. Print Formatted Output ---
+    cat("\n")
+    cat("----------------------------------------\n")
+    cat(" Factor:", factor_name, "\n")
+    cat("----------------------------------------\n")
+    print(factor_results)
+    
+  } else {
+    # Skip if no data
+    cat("\n")
+    cat("----------------------------------------\n")
+    cat(" Factor:", factor_name, "\n")
+    cat("----------------------------------------\n")
+    cat("  Skipped - No complete data for regression.\n")
+  }
+}
+
+
+
+# regression on ff5 -------------------------------------------------------
+
+# adjust so it is end of month
+factors_ff5_mom_eom <- factors_ff5_mom_monthly %>%
+  mutate(date = ceiling_date(date, "month") - days(1))
+
+# --- 3. Prepare Full Regression Data ---
+# (This assumes 'final_merged_renamed' and 'renamed_factor_cols' exist)
+
+# Join your factors with the 6-factor model data
+all_reg_data_ff5_mom <- final_merged_renamed %>%
+  select(date, all_of(renamed_factor_cols)) %>%
+  # Use the date-corrected FF5+Mom data
+  inner_join(factors_ff5_mom_eom, by = "date")
+
+cat("\n\n--- Running Full-Period FF5 + Momentum Regressions ---\n")
+
+# --- 4. Loop, Run Regressions, and Print Results ---
+
+# Loop through each factor name in your list
+for (factor_name in renamed_factor_cols) {
+  
+  # --- A. Prepare Data for this Factor ---
+  regression_df <- all_reg_data_ff5_mom %>%
+    # Calculate this factor's excess return (Factor - RF)
+    # Note: 'rf' column comes from the 'factors_ff5_mom_eom' data
+    mutate(Factor_Excess = .data[[factor_name]] - rf) %>%
+    # Select only relevant columns and drop NAs
+    select(Factor_Excess, mkt_excess, smb, hml, rmw, cma, mom) %>%
+    na.omit()
+  
+  # --- B. Run Regression (if data exists) ---
+  if (nrow(regression_df) > 0) {
+    
+    # Run the 6-factor linear model
+    ff6_model <- lm(Factor_Excess ~ mkt_excess + smb + hml + rmw + cma + mom, 
+                    data = regression_df)
+    
+    # Tidy the model output into a clean data frame
+    factor_results <- tidy(ff6_model) %>%
+      select(term, estimate, p.value) %>%
+      # Rename intercept to 'Alpha' for clarity
+      mutate(term = recode(term, `(Intercept)` = "Alpha"))
+    
+    # --- C. Print Formatted Output ---
+    cat("\n")
+    cat("----------------------------------------\n")
+    cat(" Factor:", factor_name, "\n")
+    cat("----------------------------------------\n")
+    print(factor_results)
+    
+  } else {
+    # Skip if no data
+    cat("\n")
+    cat("----------------------------------------\n")
+    cat(" Factor:", factor_name, "\n")
+    cat("----------------------------------------\n")
+    cat("  Skipped - No complete data for regression.\n")
+  }
+}
 
 
 
