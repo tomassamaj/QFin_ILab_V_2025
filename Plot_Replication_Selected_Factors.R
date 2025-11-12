@@ -696,3 +696,269 @@ for (factor_name in renamed_factor_cols) {
   }
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# New plot just using selected factors ------------------------------------
+
+selected_factors <- c(
+  # --- Core Team (8) ---
+  "Size_SMB",                      # Size
+  "Book_to_Market_HML",            # Value (Classic)
+  "Earnings_to_Price",             # Value 
+  "Operating_Profitability_RMW",   # Profitability (Classic)
+  "Asset_Growth_CMA",              # Investment (Classic)
+  "Quality_Minus_Junk_QMJ",        # Quality 
+  "Residual_Variance_RVAR",        # Low Volatility 
+  "Amihud_Illiquidity",            # Liquidity 
+  
+  # --- Expansion (7) ---
+  "Cash_Flow_to_Price",          # Value (Strong alternative)
+  "Gross_Profitability",           # Profitability (Strong alternative)
+  "Sales_Growth",                  # Growth (Distinct from Investment)
+  "Net_Operating_Assets",          # Earnings Quality (Accruals proxy)
+  "One_Year_Share_Issuance",       # Financing (Classic signal)
+  "Altman_Z_Score",                # Distress (Classic signal)
+  "High_Volume_Premium"            # Liquidity/Sentiment (Turnover)
+)
+
+cat("--- Running 'Expanded Team' Strategy with", length(selected_factors), "factors ---\n")
+print(selected_factors)
+
+# compute factor momentum strategy just using these factors
+selected_factor_momentum <- calculate_momentum(final_merged_renamed, selected_factors, "Selected Factor Momentum")
+# Apply volatility scaling
+selected_factor_momentum_scaled <- scale_volatility(selected_factor_momentum,
+                                                    target_ann_vol = target_vol,
+                                                    lookback_months = lookback)
+# --- 2. Combine with Industry Momentum and Plot ---
+if (!is.null(industry_momentum_scaled) && !is.null(selected_factor_momentum_scaled)) {
+  # Find the common start date AFTER scaling (due to lookback)
+  common_start_date_selected <- max(min(industry_momentum_scaled$date), min(selected_factor_momentum_scaled$date))
+  
+  combined_momentum_selected <- bind_rows(industry_momentum_scaled, selected_factor_momentum_scaled) %>%
+    filter(date >= common_start_date_selected) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    # Calculate cumulative return based on SCALED returns
+    mutate(cumulative_return_scaled_log = cumprod(1 + scaled_momentum_return)) %>%
+    ungroup()
+  
+  # Plotting Scaled Returns
+  plot_selected <- ggplot(combined_momentum_selected, aes(x = date, y = cumulative_return_scaled_log, color = strategy_type)) +
+    geom_line(linewidth = 1) +
+    scale_y_log10(
+      breaks = scales::log_breaks(n = 10),
+      labels = scales::label_number(accuracy = 0.1)
+    ) +
+    scale_color_manual(values = c("Industry Momentum" = "black", "Selected Factor Momentum" = "red")) +
+    labs(
+      title = paste0("Cumulative Performance of Selected Factor Momentum vs. Industry Momentum (Scaled to ", scales::percent(target_vol, accuracy = 1), " Ann. Volatility)"),
+      subtitle = "Value of $1 invested (Log Scale)",
+      x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "top",
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  print(plot_selected)
+  
+} else {
+  print("Could not calculate both selected factor and industry momentum series; skipping selected factor plot.")
+}
+
+# now plot this factor momentum strategy vs the old factor momentum that included all factors
+if (!is.null(factor_momentum_scaled) && !is.null(selected_factor_momentum_scaled)) {
+  # Find the common start date AFTER scaling (due to lookback)
+  common_start_date_comparison <- max(min(factor_momentum_scaled$date), min(selected_factor_momentum_scaled$date))
+  
+  combined_momentum_comparison <- bind_rows(factor_momentum_scaled %>% mutate(strategy_type = "All Factor Momentum"),
+                                            selected_factor_momentum_scaled %>% mutate(strategy_type = "Selected Factor Momentum")) %>%
+    filter(date >= common_start_date_comparison) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    # Calculate cumulative return based on SCALED returns
+    mutate(cumulative_return_scaled_log = cumprod(1 + scaled_momentum_return)) %>%
+    ungroup()
+  
+  # Plotting Scaled Returns
+  plot_comparison <- ggplot(combined_momentum_comparison, aes(x = date, y = cumulative_return_scaled_log, color = strategy_type)) +
+    geom_line(linewidth = 1) +
+    scale_y_log10(
+      breaks = scales::log_breaks(n = 10),
+      labels = scales::label_number(accuracy = 0.1)
+    ) +
+    scale_color_manual(values = c("All Factor Momentum" = "blue", "Selected Factor Momentum" = "red")) +
+    labs(
+      title = paste0("Cumulative Performance: All Factor vs. Selected Factor Momentum (Scaled to ", scales::percent(target_vol, accuracy = 1), " Ann. Volatility)"),
+      subtitle = "Value of $1 invested (Log Scale)",
+      x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "top",
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  print(plot_comparison)
+  
+} else {
+  print("Could not calculate both all factor and selected factor momentum series; skipping comparison plot.")
+}
+
+# Let's look at excluded factors
+excluded_factors <- setdiff(renamed_factor_cols, selected_factors)
+print(excluded_factors)
+
+# --- 2. Calculate and Scale "Excluded" Factor Momentum ---
+# Assumes 'calculate_momentum' and 'scale_volatility' functions exist
+# Assumes 'final_merged_renamed', 'target_vol', and 'lookback' exist
+if (length(excluded_factors) >= 2) {
+  excluded_factor_momentum <- calculate_momentum(final_merged_renamed, 
+                                                 excluded_factors, 
+                                                 "Excluded Factor Momentum") 
+  
+  excluded_factor_momentum_scaled <- scale_volatility(excluded_factor_momentum,
+                                                      target_ann_vol = target_vol,
+                                                      lookback_months = lookback)
+} else {
+  cat("\nWarning: Not enough 'excluded' factors to calculate momentum strategy.\n")
+  excluded_factor_momentum_scaled <- NULL
+}
+
+
+# --- 3. Combine All Three Scaled Strategies ---
+# Assumes 'factor_momentum_scaled' and 'selected_factor_momentum_scaled' exist
+if (!is.null(factor_momentum_scaled) && 
+    !is.null(selected_factor_momentum_scaled) && 
+    !is.null(excluded_factor_momentum_scaled)) {
+  
+  # Find the common start date AFTER scaling (due to lookback)
+  common_start_date_all_three <- max(
+    min(factor_momentum_scaled$date), 
+    min(selected_factor_momentum_scaled$date),
+    min(excluded_factor_momentum_scaled$date)
+  )
+  
+  # Combine, relabeling strategy_type for clarity
+  combined_momentum_all_three <- bind_rows(
+    factor_momentum_scaled %>% mutate(strategy_type = "All Factors"),
+    selected_factor_momentum_scaled %>% mutate(strategy_type = "Selected Factors"),
+    excluded_factor_momentum_scaled %>% mutate(strategy_type = "Excluded Factors")
+  ) %>%
+    filter(date >= common_start_date_all_three) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    # Calculate cumulative return based on SCALED returns
+    mutate(cumulative_return_scaled_log = cumprod(1 + scaled_momentum_return)) %>%
+    ungroup()
+  
+  # --- 4. Plot All Three ---
+  
+  # Define colors for the three strategies
+  strategy_colors <- c(
+    "All Factors"      = "blue", 
+    "Selected Factors" = "red",
+    "Excluded Factors" = "darkgreen" # Or any color you prefer
+  )
+  
+  plot_all_three <- ggplot(combined_momentum_all_three, 
+                           aes(x = date, y = cumulative_return_scaled_log, color = strategy_type)) +
+    geom_line(linewidth = 1) +
+    scale_y_log10(
+      breaks = scales::log_breaks(n = 10),
+      labels = scales::label_number(accuracy = 0.1)
+    ) +
+    scale_color_manual(values = strategy_colors) +
+    labs(
+      title = paste0("Cumulative Performance: All vs. Selected vs. Excluded Factors (Scaled to ", scales::percent(target_vol, accuracy = 1), " Ann. Volatility)"),
+      subtitle = "Value of $1 invested (Log Scale)",
+      x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "top",
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  print(plot_all_three)
+  
+} else {
+  print("Could not calculate all three momentum series; skipping combined plot.")
+}
+
+###########################################################################
+
+# Show performance of every factor 
+
+# Pivot all factor columns to a long format
+all_factors_long <- final_merged_renamed %>%
+  select(date, all_of(renamed_factor_cols)) %>%
+  pivot_longer(
+    cols = -date,
+    names_to = "factor_name",
+    values_to = "return"
+  ) %>%
+  # Remove any NAs in returns that would break cumprod
+  filter(!is.na(return))
+
+# --- 2. Calculate Cumulative Returns ---
+all_factors_cumulative <- all_factors_long %>%
+  arrange(factor_name, date) %>%
+  group_by(factor_name) %>%
+  # Calculate cumulative return for each factor independently
+  mutate(cumulative_return = cumprod(1 + return)) %>%
+  ungroup()
+
+# --- 3. Plot the "Spaghetti Graph" ---
+spaghetti_plot <- ggplot(all_factors_cumulative, aes(x = date, y = cumulative_return, group = factor_name)) +
+  geom_line(alpha = 0.6) + # Use alpha for some transparency
+  scale_y_log10(
+    breaks = scales::log_breaks(n = 10),
+    labels = scales::label_number(accuracy = 0.1)
+  ) +
+  labs(
+    title = "Cumulative Performance of All Individual Factors",
+    subtitle = "Value of $1 invested (Log Scale). Each line is one factor.",
+    x = "Year", y = "Cumulative Performance ($)"
+  ) +
+  theme_minimal(base_size = 12) +
+  # Remove the legend as it would be unreadably large
+  theme(legend.position = "none") 
+
+print(spaghetti_plot)
+# put names of each factr in the plot
+# Add factor names at the end of each line
+spaghetti_plot_labeled <- spaghetti_plot +
+  geom_text(
+    data = all_factors_cumulative %>%
+      group_by(factor_name) %>%
+      filter(date == max(date)), # Get last date for each factor
+    aes(label = factor_name),
+    hjust = 0, # Align text to the left of the point
+    nudge_x = 10, # Nudge text slightly to the right
+    size = 3, # Adjust text size as needed
+    check_overlap = TRUE # Avoid overlapping labels
+  ) +
+  xlim(min(all_factors_cumulative$date), max(all_factors_cumulative$date) + months(6)) # Extend x-axis for labels
+print(spaghetti_plot_labeled)
+
