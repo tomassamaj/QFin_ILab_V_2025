@@ -716,24 +716,20 @@ for (factor_name in renamed_factor_cols) {
 # New plot just using selected factors ------------------------------------
 
 selected_factors <- c(
-  # --- Core Team (8) ---
+  # --- Classic Factors ---
   "Size_SMB",                      # Size
-  "Book_to_Market_HML",            # Value (Classic)
-  "Earnings_to_Price",             # Value 
-  "Operating_Profitability_RMW",   # Profitability (Classic)
-  "Asset_Growth_CMA",              # Investment (Classic)
-  "Quality_Minus_Junk_QMJ",        # Quality 
-  "Residual_Variance_RVAR",        # Low Volatility 
-  "Amihud_Illiquidity",            # Liquidity 
+  "Book_to_Market_HML",            # Value
+  "Operating_Profitability_RMW",   # Profitability
+  "Asset_Growth_CMA",              # Investment
   
-  # --- Expansion (7) ---
-  "Cash_Flow_to_Price",          # Value (Strong alternative)
-  "Gross_Profitability",           # Profitability (Strong alternative)
-  "Sales_Growth",                  # Growth (Distinct from Investment)
-  "Net_Operating_Assets",          # Earnings Quality (Accruals proxy)
-  "One_Year_Share_Issuance",       # Financing (Classic signal)
-  "Altman_Z_Score",                # Distress (Classic signal)
-  "High_Volume_Premium"            # Liquidity/Sentiment (Turnover)
+  # --- Other Factors ---
+  "Long_Term_Reversals_LTREV",     # Reversal
+  "Low_Beta_BAB",                  # Low Volatility / Risk
+  "Firm_Age",                      # Quality / Lifecycle
+  "Enterprise_Multiple",           # Value (Alternative)
+  "Accruals_Factor",               # Earnings Quality
+  "Total_External_Financing",      # Financing / Issuance
+  "Piotroski_F_Score"              # Quality / Financial Strength
 )
 
 cat("--- Running 'Expanded Team' Strategy with", length(selected_factors), "factors ---\n")
@@ -961,4 +957,3 @@ spaghetti_plot_labeled <- spaghetti_plot +
   ) +
   xlim(min(all_factors_cumulative$date), max(all_factors_cumulative$date) + months(6)) # Extend x-axis for labels
 print(spaghetti_plot_labeled)
-
