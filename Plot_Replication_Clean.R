@@ -696,3 +696,273 @@ for (factor_name in renamed_factor_cols) {
   }
 }
 
+
+
+
+
+
+
+
+# --- Top/Bottom 25% (Quartile) Momentum Strategy ---
+
+# --- 1. NEW Function: 1-Month Momentum (Top/Bottom 25%) ---
+# This function longs the top 25% and shorts the bottom 25%, ignoring the middle 50%.
+calculate_momentum_quartile <- function(df, target_cols, strategy_name) {
+  
+  # Need at least 4 assets to form quartiles
+  if (length(target_cols) < 4) { 
+    warning(paste("Skipping momentum for", strategy_name, "- less than 4 columns provided."))
+    return(NULL)
+  }
+  # Check if target columns exist
+  target_cols_exist <- intersect(target_cols, colnames(df))
+  if (length(target_cols_exist) < 4) {
+    warning(paste("Skipping momentum for", strategy_name, "- less than 4 valid columns found in dataframe."))
+    return(NULL)
+  }
+  
+  momentum_df <- df %>%
+    select(date, all_of(target_cols_exist)) %>%
+    arrange(date) %>%
+    mutate(across(all_of(target_cols_exist), lag, .names = "{.col}_lag1")) %>%
+    filter(row_number() > 1) %>% # Remove first row with NAs
+    rowwise() %>%
+    mutate(
+      # Calculate 25th (q1) and 75th (q3) percentiles for this row
+      q1_lag1_ret = quantile(c_across(ends_with("_lag1")), probs = 0.25, na.rm = TRUE),
+      q3_lag1_ret = quantile(c_across(ends_with("_lag1")), probs = 0.75, na.rm = TRUE)
+    ) %>%
+    ungroup() %>%
+    mutate(across(ends_with("_lag1"),
+                  ~ case_when(
+                    !is.na(.) & . > q3_lag1_ret ~ 1,  # Long (Top 25%)
+                    !is.na(.) & . < q1_lag1_ret ~ -1, # Short (Bottom 25%)
+                    TRUE ~ 0                         # Middle 50%
+                  ),
+                  .names = "{sub('_lag1', '_pos', .col)}"
+    )) %>%
+    rowwise() %>%
+    mutate(
+      n_long = sum(c_across(ends_with("_pos")) == 1),
+      n_short = sum(c_across(ends_with("_pos")) == -1)
+    ) %>%
+    ungroup() %>%
+    # Calculate weights based on positions
+    mutate(across(ends_with("_pos"),
+                  ~ case_when(
+                    . == 1 & n_long > 0 ~ 1 / n_long,
+                    . == -1 & n_short > 0 ~ -1 / n_short, # Weight magnitude AND sign
+                    TRUE ~ 0
+                  ),
+                  .names = "{sub('_pos', '_wgt', .col)}"
+    )) %>%
+    rowwise() %>%
+    mutate(
+      # Calculate return: Sum of (Weight * Current Return)
+      momentum_return = sum(
+        c_across(ends_with("_wgt")) * # Weight includes sign here
+          c_across(all_of(target_cols_exist)), # Current month returns
+        na.rm = TRUE
+      )
+    ) %>%
+    ungroup() %>%
+    select(date, momentum_return) %>%
+    mutate(strategy_type = strategy_name)
+  
+  return(momentum_df)
+}
+
+
+# --- 2. Calculate Quartile Momentum Series ---
+# (Assumes 'final_merged_renamed', 'industry_cols', 'renamed_factor_cols' exist)
+industry_momentum_q <- calculate_momentum_quartile(final_merged_renamed, industry_cols, "Industry Momentum (Quartile)")
+factor_momentum_q <- calculate_momentum_quartile(final_merged_renamed, renamed_factor_cols, "Factor Momentum (Quartile)")
+
+
+# --- 3. Combine and Plot RAW Quartile Momentum ---
+if (!is.null(industry_momentum_q) && !is.null(factor_momentum_q)) {
+  common_start_date_q <- max(min(industry_momentum_q$date), min(factor_momentum_q$date))
+  
+  combined_momentum_q <- bind_rows(industry_momentum_q, factor_momentum_q) %>%
+    filter(date >= common_start_date_q) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    mutate(cumulative_return_log = cumprod(1 + momentum_return)) %>%
+    ungroup()
+  
+  # Plotting
+  print(
+    ggplot(combined_momentum_q, aes(x = date, y = cumulative_return_log, color = strategy_type)) +
+      geom_line(linewidth = 1) +
+      scale_y_log10(
+        breaks = scales::log_breaks(n = 10),
+        labels = scales::label_number(accuracy = 0.1)
+      ) +
+      scale_color_manual(values = c("Industry Momentum (Quartile)" = "black", "Factor Momentum (Quartile)" = "orange")) +
+      labs(
+        title = "Cumulative Performance (Quartile Strategy: Top 25% vs Bottom 25%)",
+        subtitle = "Value of $1 invested (Log Scale)",
+        x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+      ) +
+      theme_minimal(base_size = 12) +
+      theme(
+        legend.position = "top",
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)
+      )
+  )
+} else {
+  print("Could not calculate both quartile momentum series; skipping combined plot.")
+}
+
+
+# --- 4. Apply Volatility Scaling to Quartile Strategies ---
+# (Assumes 'scale_volatility' function, 'target_vol', and 'lookback' exist)
+
+if (!is.null(industry_momentum_q)) {
+  industry_momentum_q_scaled <- scale_volatility(industry_momentum_q,
+                                               target_ann_vol = target_vol,
+                                               lookback_months = lookback)
+} else {
+  industry_momentum_q_scaled <- NULL
+}
+
+if (!is.null(factor_momentum_q)) {
+  factor_momentum_q_scaled <- scale_volatility(factor_momentum_q,
+                                             target_ann_vol = target_vol,
+                                             lookback_months = lookback)
+} else {
+  factor_momentum_q_scaled <- NULL
+}
+
+
+# --- 5. Combine and Plot SCALED Quartile Momentum ---
+if (!is.null(industry_momentum_q_scaled) && !is.null(factor_momentum_q_scaled)) {
+  common_start_date_q_scaled <- max(min(industry_momentum_q_scaled$date), min(factor_momentum_q_scaled$date))
+  
+  combined_momentum_q_scaled <- bind_rows(industry_momentum_q_scaled, factor_momentum_q_scaled) %>%
+    filter(date >= common_start_date_q_scaled) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    mutate(cumulative_return_scaled_log = cumprod(1 + scaled_momentum_return)) %>%
+    ungroup()
+  
+  # Plotting Scaled Quartile Returns
+  plot_q_scaled <- ggplot(combined_momentum_q_scaled, aes(x = date, y = cumulative_return_scaled_log, color = strategy_type)) +
+    geom_line(linewidth = 1) +
+    scale_y_log10(
+      breaks = scales::log_breaks(n = 10),
+      labels = scales::label_number(accuracy = 0.1)
+    ) +
+    scale_color_manual(values = c("Industry Momentum (Quartile)" = "black", "Factor Momentum (Quartile)" = "orange")) +
+    labs(
+      title = paste0("Cumulative Performance (Quartile Strategy, Scaled to ", scales::percent(target_vol, accuracy = 1), " Ann. Volatility)"),
+      subtitle = "Value of $1 invested (Log Scale)",
+      x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "top",
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  print(plot_q_scaled)
+  
+} else {
+  print("Could not calculate both scaled quartile momentum series; skipping scaled plot.")
+}
+
+
+# --- 50/50 vs 25/25 Factor Momentum Comparison Plots ---
+
+# --- 1. Combine RAW Factor Momentum Strategies ---
+if (!is.null(factor_momentum_raw) && !is.null(factor_momentum_q)) {
+  
+  # Combine the two factor momentum strategies (50/50 and 25/25)
+  combined_factor_mom <- bind_rows(factor_momentum_raw, factor_momentum_q)
+  
+  # Find common start date
+  common_start_date_factor_comp <- max(min(factor_momentum_raw$date), min(factor_momentum_q$date))
+  
+  # Calculate cumulative returns
+  factor_mom_comp_plot_data <- combined_factor_mom %>%
+    filter(date >= common_start_date_factor_comp) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    mutate(cumulative_return_log = cumprod(1 + momentum_return)) %>%
+    ungroup()
+  
+  # Plotting Raw Comparison
+  plot_factor_comp_raw <- ggplot(factor_mom_comp_plot_data, aes(x = date, y = cumulative_return_log, color = strategy_type)) +
+    geom_line(linewidth = 1) +
+    scale_y_log10(
+      breaks = scales::log_breaks(n = 10),
+      labels = scales::label_number(accuracy = 0.1)
+    ) +
+    # Use distinct colors for comparison
+    scale_color_manual(values = c("Factor Momentum" = "blue", "Factor Momentum (Quartile)" = "orange")) +
+    labs(
+      title = "Factor Momentum Comparison (Raw Returns)",
+      subtitle = "50/50 (Median) vs. 25/25 (Quartile) Strategy | Log Scale",
+      x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "top",
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  print(plot_factor_comp_raw)
+  
+} else {
+  print("Could not find raw factor momentum data for 50/50 vs 25/25 comparison plot.")
+}
+
+
+# --- 2. Combine SCALED Factor Momentum Strategies ---
+if (!is.null(factor_momentum_scaled) && !is.null(factor_momentum_q_scaled)) {
+  
+  # Combine the two SCALED factor momentum strategies
+  combined_factor_mom_scaled <- bind_rows(factor_momentum_scaled, factor_momentum_q_scaled)
+  
+  # Find common start date
+  common_start_date_factor_comp_scaled <- max(min(factor_momentum_scaled$date), min(factor_momentum_q_scaled$date))
+  
+  # Calculate cumulative returns
+  factor_mom_comp_scaled_plot_data <- combined_factor_mom_scaled %>%
+    filter(date >= common_start_date_factor_comp_scaled) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    # Use the scaled return column
+    mutate(cumulative_return_scaled_log = cumprod(1 + scaled_momentum_return)) %>%
+    ungroup()
+  
+  # Plotting Scaled Comparison
+  plot_factor_comp_scaled <- ggplot(factor_mom_comp_scaled_plot_data, aes(x = date, y = cumulative_return_scaled_log, color = strategy_type)) +
+    geom_line(linewidth = 1) +
+    scale_y_log10(
+      breaks = scales::log_breaks(n = 10),
+      labels = scales::label_number(accuracy = 0.1)
+    ) +
+    # Use distinct colors for comparison
+    scale_color_manual(values = c("Factor Momentum" = "blue", "Factor Momentum (Quartile)" = "orange")) +
+    labs(
+      title = paste0("Factor Momentum Comparison (Scaled to ", scales::percent(target_vol, accuracy = 1), " Ann. Volatility)"),
+      subtitle = "50/50 (Median) vs. 25/25 (Quartile) Strategy | Log Scale",
+      x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "top",
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  print(plot_factor_comp_scaled)
+  
+} else {
+  print("Could not find scaled factor momentum data for 50/50 vs 25/25 comparison plot.")
+}
+
