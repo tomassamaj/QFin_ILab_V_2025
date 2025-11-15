@@ -698,6 +698,318 @@ for (factor_name in renamed_factor_cols) {
 
 
 
+# regression on ff5 -------------------------------------------------------
+
+# adjust so it is end of month
+factors_ff5_mom_eom <- factors_ff5_mom_monthly %>%
+  mutate(date = ceiling_date(date, "month") - days(1))
+
+# --- 3. Prepare Full Regression Data ---
+# (This assumes 'final_merged_renamed' and 'renamed_factor_cols' exist)
+
+# Join your factors with the 6-factor model data
+all_reg_data_ff5_mom <- final_merged_renamed %>%
+  select(date, all_of(renamed_factor_cols)) %>%
+  # Use the date-corrected FF5+Mom data
+  inner_join(factors_ff5_mom_eom, by = "date")
+
+cat("\n\n--- Running Full-Period FF5 + Momentum Regressions ---\n")
+
+# --- 4. Loop, Run Regressions, and Print Results ---
+
+# Loop through each factor name in your list
+for (factor_name in renamed_factor_cols) {
+  
+  # --- A. Prepare Data for this Factor ---
+  regression_df <- all_reg_data_ff5_mom %>%
+    # Calculate this factor's excess return (Factor - RF)
+    # Note: 'rf' column comes from the 'factors_ff5_mom_eom' data
+    mutate(Factor_Excess = .data[[factor_name]] - rf) %>%
+    # Select only relevant columns and drop NAs
+    select(Factor_Excess, mkt_excess, smb, hml, rmw, cma, mom) %>%
+    na.omit()
+  
+  # --- B. Run Regression (if data exists) ---
+  if (nrow(regression_df) > 0) {
+    
+    # Run the 6-factor linear model
+    ff6_model <- lm(Factor_Excess ~ mkt_excess + smb + hml + rmw + cma + mom, 
+                    data = regression_df)
+    
+    # Tidy the model output into a clean data frame
+    factor_results <- tidy(ff6_model) %>%
+      select(term, estimate, p.value) %>%
+      # Rename intercept to 'Alpha' for clarity
+      mutate(term = recode(term, `(Intercept)` = "Alpha"))
+    
+    # --- C. Print Formatted Output ---
+    cat("\n")
+    cat("----------------------------------------\n")
+    cat(" Factor:", factor_name, "\n")
+    cat("----------------------------------------\n")
+    print(factor_results)
+    
+  } else {
+    # Skip if no data
+    cat("\n")
+    cat("----------------------------------------\n")
+    cat(" Factor:", factor_name, "\n")
+    cat("----------------------------------------\n")
+    cat("  Skipped - No complete data for regression.\n")
+  }
+}
+
+
+
+# New plot just using selected factors ------------------------------------
+
+selected_factors <- c(
+  # --- Classic Factors ---
+  "Size_SMB",                      # Size
+  "Book_to_Market_HML",            # Value
+  "Operating_Profitability_RMW",   # Profitability
+  "Asset_Growth_CMA",              # Investment
+  
+  # --- Other Factors ---
+  "Long_Term_Reversals_LTREV",     # Reversal
+  "Low_Beta_BAB",                  # Low Volatility / Risk
+  "Firm_Age",                      # Quality / Lifecycle
+  "Enterprise_Multiple",           # Value (Alternative)
+  "Accruals_Factor",               # Earnings Quality
+  "Total_External_Financing",      # Financing / Issuance
+  "Piotroski_F_Score"              # Quality / Financial Strength
+)
+
+cat("--- Running 'Expanded Team' Strategy with", length(selected_factors), "factors ---\n")
+print(selected_factors)
+
+# --- 1. Compute Selected Factor Momentum (UNSCALED) ---
+# We just need the output from calculate_momentum, not scale_volatility
+selected_factor_momentum <- calculate_momentum(final_merged_renamed, 
+                                               selected_factors, 
+                                               "Selected Factor Momentum")
+
+# --- 2. Combine with Industry Momentum and Plot (UNSCALED) ---
+# *** ASSUMPTION: 'industry_momentum' (unscaled) exists and has 'date', 'momentum_return', 'strategy_type' columns ***
+if (!is.null(industry_momentum) && !is.null(selected_factor_momentum)) {
+  # Find the common start date
+  common_start_date_selected_unscaled <- max(min(industry_momentum$date), min(selected_factor_momentum$date))
+  
+  combined_momentum_selected_unscaled <- bind_rows(industry_momentum, selected_factor_momentum) %>%
+    filter(date >= common_start_date_selected_unscaled) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    # Calculate cumulative return based on UNSCALED returns
+    # *** ASSUMPTION: The unscaled return column is named 'momentum_return' ***
+    mutate(cumulative_return_unscaled_log = cumprod(1 + momentum_return)) %>%
+    ungroup()
+  
+  # Plotting Unscaled Returns
+  plot_selected_unscaled <- ggplot(combined_momentum_selected_unscaled, aes(x = date, y = cumulative_return_unscaled_log, color = strategy_type)) +
+    geom_line(linewidth = 1) +
+    scale_y_log10(
+      breaks = scales::log_breaks(n = 10),
+      labels = scales::label_number(accuracy = 0.1)
+    ) +
+    scale_color_manual(values = c("Industry Momentum" = "black", "Selected Factor Momentum" = "red")) +
+    labs(
+      title = "Cumulative Performance of Selected Factor Momentum vs. Industry Momentum (Unscaled)",
+      subtitle = "Value of $1 invested (Log Scale)",
+      x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "top",
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  print(plot_selected_unscaled)
+  
+} else {
+  print("Could not find both unscaled selected factor and industry momentum series; skipping selected factor plot.")
+}
+
+---
+  
+  # --- 3. Plot Selected Factor Momentum vs. All Factor Momentum (UNSCALED) ---
+  # *** ASSUMPTION: 'factor_momentum' (unscaled "All Factors") exists and has 'date', 'momentum_return', 'strategy_type' columns ***
+  if (!is.null(factor_momentum) && !is.null(selected_factor_momentum)) {
+    # Find the common start date
+    common_start_date_comparison_unscaled <- max(min(factor_momentum$date), min(selected_factor_momentum$date))
+    
+    combined_momentum_comparison_unscaled <- bind_rows(
+      factor_momentum %>% mutate(strategy_type = "All Factor Momentum"), # 'factor_momentum' is assumed to be the "All Factors" one
+      selected_factor_momentum # This already has strategy_type = "Selected Factor Momentum" from its creation
+    ) %>%
+      filter(date >= common_start_date_comparison_unscaled) %>%
+      arrange(strategy_type, date) %>%
+      group_by(strategy_type) %>%
+      # Calculate cumulative return based on UNSCALED returns
+      # *** ASSUMPTION: The unscaled return column is named 'momentum_return' ***
+      mutate(cumulative_return_unscaled_log = cumprod(1 + momentum_return)) %>%
+      ungroup()
+    
+    # Plotting Unscaled Returns
+    plot_comparison_unscaled <- ggplot(combined_momentum_comparison_unscaled, aes(x = date, y = cumulative_return_unscaled_log, color = strategy_type)) +
+      geom_line(linewidth = 1) +
+      scale_y_log10(
+        breaks = scales::log_breaks(n = 10),
+        labels = scales::label_number(accuracy = 0.1)
+      ) +
+      scale_color_manual(values = c("All Factor Momentum" = "blue", "Selected Factor Momentum" = "red")) +
+      labs(
+        title = "Cumulative Performance: All Factor vs. Selected Factor Momentum (Unscaled)",
+        subtitle = "Value of $1 invested (Log Scale)",
+        x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+      ) +
+      theme_minimal(base_size = 12) +
+      theme(
+        legend.position = "top",
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)
+      )
+    
+    print(plot_comparison_unscaled)
+    
+  } else {
+    print("Could not calculate both unscaled all factor and selected factor momentum series; skipping comparison plot.")
+  }
+
+---
+  
+  # --- 4. Calculate "Excluded" Factor Momentum (UNSCALED) ---
+  excluded_factors <- setdiff(renamed_factor_cols, selected_factors)
+print("Excluded factors:")
+print(excluded_factors)
+
+if (length(excluded_factors) >= 2) {
+  excluded_factor_momentum <- calculate_momentum(final_merged_renamed, 
+                                                 excluded_factors, 
+                                                 "Excluded Factor Momentum") 
+} else {
+  cat("\nWarning: Not enough 'excluded' factors to calculate momentum strategy.\n")
+  excluded_factor_momentum <- NULL
+}
+# --- 5. Combine All Three Unscaled Strategies ---
+# *** ASSUMPTION: 'factor_momentum' (unscaled "All Factors") exists ***
+if (!is.null(factor_momentum) && 
+    !is.null(selected_factor_momentum) && 
+    !is.null(excluded_factor_momentum)) {
+  
+  # Find the common start date
+  common_start_date_all_three_unscaled <- max(
+    min(factor_momentum$date), 
+    min(selected_factor_momentum$date),
+    min(excluded_factor_momentum$date)
+  )
+  
+  # Combine, relabeling strategy_type for clarity
+  combined_momentum_all_three_unscaled <- bind_rows(
+    # *** FIX: Explicitly set strategy_type to match the scale_color_manual keys ***
+    factor_momentum %>% mutate(strategy_type = "All Factors"), 
+    selected_factor_momentum %>% mutate(strategy_type = "Selected Factors"), 
+    excluded_factor_momentum %>% mutate(strategy_type = "Excluded Factors")
+  ) %>%
+    filter(date >= common_start_date_all_three_unscaled) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    # Calculate cumulative return based on UNSCALED returns
+    # *** ASSUMPTION: The unscaled return column is named 'momentum_return' ***
+    mutate(cumulative_return_unscaled_log = cumprod(1 + momentum_return)) %>%
+    ungroup()
+  
+  # --- 6. Plot All Three (UNSCALED) ---
+  
+  # Define colors for the three strategies
+  # (This part was already correct)
+  strategy_colors <- c(
+    "All Factors"      = "blue", 
+    "Selected Factors" = "red",
+    "Excluded Factors" = "darkgreen"
+  )
+  
+  plot_all_three_unscaled <- ggplot(combined_momentum_all_three_unscaled, 
+                                    aes(x = date, y = cumulative_return_unscaled_log, color = strategy_type)) +
+    geom_line(linewidth = 1) +
+    scale_y_log10(
+      breaks = scales::log_breaks(n = 10),
+      labels = scales::label_number(accuracy = 0.1)
+    ) +
+    # Now the 'values' (colors) will correctly match the 'strategy_type' column
+    scale_color_manual(values = strategy_colors) + 
+    labs(
+      title = "Cumulative Performance: All vs. Selected vs. Excluded Factors (Unscaled)",
+      subtitle = "Value of $1 invested (Log Scale)",
+      x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "top",
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  print(plot_all_three_unscaled)
+  
+} else {
+  print("Could not calculate all three unscaled momentum series; skipping combined plot.")
+}
+###########################################################################
+
+# Show performance of every factor 
+
+# Pivot all factor columns to a long format
+all_factors_long <- final_merged_renamed %>%
+  select(date, all_of(renamed_factor_cols)) %>%
+  pivot_longer(
+    cols = -date,
+    names_to = "factor_name",
+    values_to = "return"
+  ) %>%
+  # Remove any NAs in returns that would break cumprod
+  filter(!is.na(return))
+
+# --- 2. Calculate Cumulative Returns ---
+all_factors_cumulative <- all_factors_long %>%
+  arrange(factor_name, date) %>%
+  group_by(factor_name) %>%
+  # Calculate cumulative return for each factor independently
+  mutate(cumulative_return = cumprod(1 + return)) %>%
+  ungroup()
+
+# --- 3. Plot the "Spaghetti Graph" ---
+spaghetti_plot <- ggplot(all_factors_cumulative, aes(x = date, y = cumulative_return, group = factor_name)) +
+  geom_line(alpha = 0.6) + # Use alpha for some transparency
+  scale_y_log10(
+    breaks = scales::log_breaks(n = 10),
+    labels = scales::label_number(accuracy = 0.1)
+  ) +
+  labs(
+    title = "Cumulative Performance of All Individual Factors",
+    subtitle = "Value of $1 invested (Log Scale). Each line is one factor.",
+    x = "Year", y = "Cumulative Performance ($)"
+  ) +
+  theme_minimal(base_size = 12) +
+  # Remove the legend as it would be unreadably large
+  theme(legend.position = "none") 
+
+print(spaghetti_plot)
+# put names of each factr in the plot
+# Add factor names at the end of each line
+spaghetti_plot_labeled <- spaghetti_plot +
+  geom_text(
+    data = all_factors_cumulative %>%
+      group_by(factor_name) %>%
+      filter(date == max(date)), # Get last date for each factor
+    aes(label = factor_name),
+    hjust = 0, # Align text to the left of the point
+    nudge_x = 10, # Nudge text slightly to the right
+    size = 3, # Adjust text size as needed
+    check_overlap = TRUE # Avoid overlapping labels
+  ) +
+  xlim(min(all_factors_cumulative$date), max(all_factors_cumulative$date) + months(6)) # Extend x-axis for labels
+print(spaghetti_plot_labeled)
 
 
 
