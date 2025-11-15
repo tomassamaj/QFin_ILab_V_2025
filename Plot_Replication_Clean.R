@@ -966,3 +966,160 @@ if (!is.null(factor_momentum_scaled) && !is.null(factor_momentum_q_scaled)) {
   print("Could not find scaled factor momentum data for 50/50 vs 25/25 comparison plot.")
 }
 
+
+
+# --- 11. Factor Momentum with 1-Month Execution Lag (signal at t, return at t+1) ---
+
+# Helper: momentum with execution lag
+calculate_momentum_lagged <- function(df, target_cols, strategy_name, execution_lag = 1) {
+  if (length(target_cols) < 2) {
+    warning(paste("Skipping momentum for", strategy_name, "- less than 2 columns provided."))
+    return(NULL)
+  }
+  target_cols_exist <- intersect(target_cols, colnames(df))
+  if (length(target_cols_exist) < 2) {
+    warning(paste("Skipping momentum for", strategy_name, "- less than 2 valid columns found in dataframe."))
+    return(NULL)
+  }
+  
+  out <- df %>%
+    select(date, all_of(target_cols_exist)) %>%
+    arrange(date) %>%
+    # build ranks on 1M-lagged returns (information at t)
+    mutate(across(all_of(target_cols_exist), lag, .names = "{.col}_lag1")) %>%
+    filter(row_number() > 1) %>%
+    rowwise() %>%
+    mutate(median_lag1_ret = median(c_across(ends_with("_lag1")), na.rm = TRUE)) %>%
+    ungroup() %>%
+    # positions: above-median long (+1), below/equal short (-1)
+    mutate(across(ends_with("_lag1"),
+                  ~ case_when(
+                    !is.na(.) & . >  median_lag1_ret ~  1,
+                    !is.na(.) & . <= median_lag1_ret ~ -1,
+                    TRUE ~ 0
+                  ),
+                  .names = "{sub('_lag1', '_pos', .col)}")) %>%
+    rowwise() %>%
+    mutate(
+      n_long  = sum(c_across(ends_with("_pos")) == 1),
+      n_short = sum(c_across(ends_with("_pos")) == -1)
+    ) %>%
+    ungroup() %>%
+    # convert positions to signed 1/N weights
+    mutate(across(ends_with("_pos"),
+                  ~ case_when(
+                    . == 1  & n_long  > 0 ~  1 / n_long,
+                    . == -1 & n_short > 0 ~ -1 / n_short,
+                    TRUE ~ 0
+                  ),
+                  .names = "{sub('_pos', '_wgt', .col)}"))
+  
+  if (execution_lag > 0) {
+    # apply weights to forward returns at t+lag
+    lead_names <- paste0(target_cols_exist, "_lead")
+    out <- out %>%
+      mutate(across(all_of(target_cols_exist), dplyr::lead, n = execution_lag, .names = "{.col}_lead")) %>%
+      mutate(valid_row = rowSums(across(all_of(lead_names), ~ !is.na(.))) > 0) %>%
+      filter(valid_row) %>%
+      select(-valid_row) %>%
+      rowwise() %>%
+      mutate(momentum_return = sum(c_across(ends_with("_wgt")) * c_across(all_of(lead_names)), na.rm = TRUE)) %>%
+      ungroup() %>%
+      mutate(
+        signal_date         = date,
+        implementation_date = date %m+% months(execution_lag)
+      ) %>%
+      transmute(date = implementation_date,
+                momentum_return,
+                strategy_type = strategy_name) %>%
+      arrange(date)
+  } else {
+    out <- out %>%
+      rowwise() %>%
+      mutate(momentum_return = sum(c_across(ends_with("_wgt")) * c_across(all_of(target_cols_exist)), na.rm = TRUE)) %>%
+      ungroup() %>%
+      transmute(date, momentum_return, strategy_type = strategy_name) %>%
+      arrange(date)
+  }
+  
+  out
+}
+
+# Build (or reuse) industry momentum same-month
+if (!exists("industry_momentum") || is.null(industry_momentum)) {
+  industry_momentum <- calculate_momentum(final_merged_renamed, industry_cols, "Industry Momentum")
+}
+
+# Factor momentum with 1M delay (e.g., November signal -> December return)
+factor_momentum_lag1 <- calculate_momentum_lagged(
+  final_merged_renamed, renamed_factor_cols, "Factor Momentum (1M Lag)", execution_lag = 1
+)
+
+# Combine & plot
+if (!is.null(industry_momentum) && !is.null(factor_momentum_lag1)) {
+  common_start_date <- max(min(industry_momentum$date), min(factor_momentum_lag1$date))
+  
+  combined_momentum_lag <- bind_rows(industry_momentum, factor_momentum_lag1) %>%
+    filter(date >= common_start_date) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    mutate(cumulative_return_log = cumprod(1 + momentum_return)) %>%
+    ungroup()
+  
+  print(
+    ggplot(combined_momentum_lag, aes(x = date, y = cumulative_return_log, color = strategy_type)) +
+      geom_line(linewidth = 1) +
+      scale_y_log10(breaks = scales::log_breaks(n = 10),
+                    labels = scales::label_number(accuracy = 0.1)) +
+      scale_color_manual(values = c("Industry Momentum" = "black",
+                                    "Factor Momentum (1M Lag)" = "blue")) +
+      labs(
+        title = "Cumulative Performance: Industry (T) vs Factor (T+1)",
+        subtitle = "Factor allocation delayed by one month (Nov signal → Dec return)",
+        x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+      ) +
+      theme_minimal(base_size = 12) +
+      theme(legend.position = "top",
+            plot.title = element_text(hjust = 0.5),
+            plot.subtitle = element_text(hjust = 0.5))
+  )
+} else {
+  print("Could not calculate both momentum series; skipping delayed plot.")
+}
+
+# (Optional) If you want the scaled plot too and scale_volatility() exists:
+if (exists("scale_volatility")) {
+  target_vol <- if (exists("target_vol")) target_vol else 0.10
+  lookback   <- if (exists("lookback"))   lookback   else 36
+  
+  ind_scaled <- tryCatch(scale_volatility(industry_momentum, target_ann_vol = target_vol, lookback_months = lookback), error = function(e) NULL)
+  fac_scaled <- tryCatch(scale_volatility(factor_momentum_lag1, target_ann_vol = target_vol, lookback_months = lookback), error = function(e) NULL)
+  
+  if (!is.null(ind_scaled) && !is.null(fac_scaled)) {
+    common_start_date_scaled <- max(min(ind_scaled$date), min(fac_scaled$date))
+    combined_scaled <- bind_rows(ind_scaled, fac_scaled) %>%
+      filter(date >= common_start_date_scaled) %>%
+      arrange(strategy_type, date) %>%
+      group_by(strategy_type) %>%
+      mutate(cumulative_return_scaled_log = cumprod(1 + scaled_momentum_return)) %>%
+      ungroup()
+    
+    print(
+      ggplot(combined_scaled, aes(x = date, y = cumulative_return_scaled_log, color = strategy_type)) +
+        geom_line(linewidth = 1) +
+        scale_y_log10(breaks = scales::log_breaks(n = 10),
+                      labels = scales::label_number(accuracy = 0.1)) +
+        scale_color_manual(values = c("Industry Momentum" = "black",
+                                      "Factor Momentum (1M Lag)" = "blue")) +
+        labs(
+          title = paste0("Cumulative Performance (Scaled to ", scales::percent(target_vol, accuracy = 1), " Ann. Vol): Industry (T) vs Factor (T+1)"),
+          subtitle = "Value of $1 invested (Log Scale)",
+          x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+        ) +
+        theme_minimal(base_size = 12) +
+        theme(legend.position = "top",
+              plot.title = element_text(hjust = 0.5),
+              plot.subtitle = element_text(hjust = 0.5))
+    )
+  }
+}
