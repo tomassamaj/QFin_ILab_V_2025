@@ -698,10 +698,10 @@ if (!is.null(industry_momentum) && !is.null(selected_factor_momentum)) {
   print("Could not find both unscaled selected factor and industry momentum series; skipping selected factor plot.")
 }
 
----
+# ---
   
   # --- 3. Plot Selected Factor Momentum vs. All Factor Momentum (UNSCALED) ---
-  if (!is.null(factor_momentum) && !is.null(selected_factor_momentum)) {
+if (!is.null(factor_momentum) && !is.null(selected_factor_momentum)) {
     # Find the common start date
     common_start_date_comparison_unscaled <- max(min(factor_momentum$date), min(selected_factor_momentum$date))
     
@@ -742,10 +742,10 @@ if (!is.null(industry_momentum) && !is.null(selected_factor_momentum)) {
     print("Could not calculate both unscaled all factor and selected factor momentum series; skipping comparison plot.")
   }
 
----
+# ---
   
   # --- 4. Calculate "Excluded" Factor Momentum (UNSCALED) ---
-  excluded_factors <- setdiff(renamed_factor_cols, selected_factors)
+excluded_factors <- setdiff(renamed_factor_cols, selected_factors)
 print("Excluded factors:")
 print(excluded_factors)
 
