@@ -11,6 +11,11 @@ library(ggplot2)
 library(scales)
 library(corrplot)
 library(RColorBrewer)
+library(broom) # For tidying model output
+# --- Load Required Libraries ---
+# Make sure these are loaded from your previous script
+library(zoo) # For rollapply
+library(purrr)     # For loops/mapping
 
 # --- 1. Load and Prepare Factor/Theme Data ---
 
@@ -221,7 +226,6 @@ if (!is.null(industry_momentum) && !is.null(factor_momentum)) {
   print("Could not calculate both momentum series; skipping combined plot.")
 }
 
-
 # --- 9. Correlation Heatmap of Renamed Factors ---
 
 # Select only the renamed factor columns for correlation
@@ -277,37 +281,7 @@ if (ncol(factor_data_for_corr) >= 2) {
   print("Not enough factor columns with complete data to generate correlation plot.")
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# --- Load Required Libraries ---
-# Make sure these are loaded from your previous script
-library(dplyr)
-library(tidyr)
-library(lubridate)
-library(stringr)
-library(ggplot2)
-library(scales)
-library(zoo) # For rollapply
-
-# --- [Your existing code for Steps 1-5: Loading Data, Merging, Renaming] ---
-# Assume final_merged_renamed, industry_cols, renamed_factor_cols exist here
-
 # --- 6. Function to Calculate 1-Month Momentum Returns ---
-# (Keep your existing calculate_momentum function as is)
 calculate_momentum <- function(df, target_cols, strategy_name) {
   if (length(target_cols) < 2) {
     warning(paste("Skipping momentum for", strategy_name, "- less than 2 columns provided."))
@@ -367,13 +341,11 @@ calculate_momentum <- function(df, target_cols, strategy_name) {
   return(momentum_df)
 }
 
-
 # --- 7. Calculate Raw Industry and Factor Momentum ---
 industry_momentum_raw <- calculate_momentum(final_merged_renamed, industry_cols, "Industry Momentum")
 factor_momentum_raw <- calculate_momentum(final_merged_renamed, renamed_factor_cols, "Factor Momentum")
 
-
-# --- NEW: Function for Volatility Scaling ---
+# --- Function for Volatility Scaling ---
 scale_volatility <- function(df, target_ann_vol = 0.10, lookback_months = 36, min_obs = 12) {
   if (!"momentum_return" %in% colnames(df)) {
     stop("Input dataframe must contain 'momentum_return' column.")
@@ -455,8 +427,6 @@ if (!is.null(industry_momentum_scaled) && !is.null(factor_momentum_scaled)) {
     scale_y_log10(
       breaks = scales::log_breaks(n = 10),
       labels = scales::label_number(accuracy = 0.1)
-      # You might need to adjust limits if scaling causes issues
-      # limits = c(0.1, max(combined_momentum_scaled$cumulative_return_scaled_log) * 1.1)
     ) +
     scale_color_manual(values = c("Industry Momentum" = "black", "Factor Momentum" = "blue")) +
     labs(
@@ -477,24 +447,6 @@ if (!is.null(industry_momentum_scaled) && !is.null(factor_momentum_scaled)) {
   print("Could not calculate both scaled momentum series; skipping scaled plot.")
 }
 
-# --- [Your existing code for Correlation Heatmap] ---
-# (Should work as before, using final_merged_renamed and renamed_factor_cols)
-
-
-
-
-
-
-
-
-
-# --- Load Required Libraries ---
-# (Ensure dplyr, lubridate, frenchdata, broom are loaded from your main script)
-library(broom) # For tidying model output
-
-# --- Assume 'final_merged_renamed' dataframe exists from previous steps ---
-# It should contain your JKP factors (like Book_to_Market_HML) and dates.
-
 # --- 1. Download Fama-French 3 Factors ---
 # Define dates matching your main data
 start_date_ff <- floor_date(min(final_merged_renamed$date), "month")
@@ -513,7 +465,6 @@ ff3_factors_monthly <- ff3_factors_monthly_raw$subsets$data[[1]] |>
   rename(Mkt_RF = "Mkt-RF") # Rename for easier formula use
 
 # --- 2. Select One JKP Factor to Regress ---
-# Example: Using the JKP Book-to-Market factor you renamed
 jkp_factor_name <- "Book_to_Market_HML" # Make sure this matches a column name
 
 reg_data <- final_merged_renamed %>%
@@ -541,17 +492,6 @@ glance_summary <- glance(ff3_model)
 print("Model Fit Statistics:")
 print(glance_summary)
 
-# --- Sneak Peek into Next Steps ---
-# You would loop this process for:
-# 1. All relevant JKP factors in 'renamed_factor_cols'.
-# 2. Different models (e.g., FF5 + UMD by adding CMA, RMW, UMD).
-# 3. Potentially regressing your calculated *factor momentum strategy* returns.
-
-
-
-
-
-
 ################ ROUND 2 ####################
 
 factors_ff5_monthly_raw <- download_french_data("Fama/French 5 Factors (2x3)")
@@ -565,7 +505,6 @@ factors_ff5_monthly <- factors_ff5_monthly_raw$subsets$data[[1]] |>
   rename_with(str_to_lower) |>
   rename(mkt_excess = `mkt-rf`) |> 
   filter(date >= start_date & date <= end_date)
-
 
 factors_mom_monthly_raw <- download_french_data("Momentum Factor (Mom)")
 
@@ -584,7 +523,6 @@ factors_ff5_mom_monthly <- inner_join(factors_ff5_monthly, factors_mom_monthly, 
 
 # --- 3. Run Regressions for All Factors ---
 
-# Continue from your provided line:
 all_reg_data <- final_merged_renamed %>%
   select(date, all_of(renamed_factor_cols)) %>%
   inner_join(ff3_factors_monthly, by = "date")
@@ -593,7 +531,7 @@ cat("\n\n--- Running Full-Period FF3 Regressions ---\n")
 
 # --- 3. Loop, Run Regressions, and Print Results ---
 
-# Loop through each factor name in your list
+# Loop through each factor name in the list
 for (factor_name in renamed_factor_cols) {
   
   # --- A. Prepare Data for this Factor ---
@@ -633,18 +571,15 @@ for (factor_name in renamed_factor_cols) {
   }
 }
 
-
-
-# regression on ff5 -------------------------------------------------------
+# Regression on ff5 -------------------------------------------------------
 
 # adjust so it is end of month
 factors_ff5_mom_eom <- factors_ff5_mom_monthly %>%
   mutate(date = ceiling_date(date, "month") - days(1))
 
 # --- 3. Prepare Full Regression Data ---
-# (This assumes 'final_merged_renamed' and 'renamed_factor_cols' exist)
 
-# Join your factors with the 6-factor model data
+# Join factors with the 6-factor model data
 all_reg_data_ff5_mom <- final_merged_renamed %>%
   select(date, all_of(renamed_factor_cols)) %>%
   # Use the date-corrected FF5+Mom data
@@ -654,7 +589,7 @@ cat("\n\n--- Running Full-Period FF5 + Momentum Regressions ---\n")
 
 # --- 4. Loop, Run Regressions, and Print Results ---
 
-# Loop through each factor name in your list
+# Loop through each factor name in the list
 for (factor_name in renamed_factor_cols) {
   
   # --- A. Prepare Data for this Factor ---
@@ -695,70 +630,6 @@ for (factor_name in renamed_factor_cols) {
     cat("  Skipped - No complete data for regression.\n")
   }
 }
-
-
-
-# regression on ff5 -------------------------------------------------------
-
-# adjust so it is end of month
-factors_ff5_mom_eom <- factors_ff5_mom_monthly %>%
-  mutate(date = ceiling_date(date, "month") - days(1))
-
-# --- 3. Prepare Full Regression Data ---
-# (This assumes 'final_merged_renamed' and 'renamed_factor_cols' exist)
-
-# Join your factors with the 6-factor model data
-all_reg_data_ff5_mom <- final_merged_renamed %>%
-  select(date, all_of(renamed_factor_cols)) %>%
-  # Use the date-corrected FF5+Mom data
-  inner_join(factors_ff5_mom_eom, by = "date")
-
-cat("\n\n--- Running Full-Period FF5 + Momentum Regressions ---\n")
-
-# --- 4. Loop, Run Regressions, and Print Results ---
-
-# Loop through each factor name in your list
-for (factor_name in renamed_factor_cols) {
-  
-  # --- A. Prepare Data for this Factor ---
-  regression_df <- all_reg_data_ff5_mom %>%
-    # Calculate this factor's excess return (Factor - RF)
-    # Note: 'rf' column comes from the 'factors_ff5_mom_eom' data
-    mutate(Factor_Excess = .data[[factor_name]] - rf) %>%
-    # Select only relevant columns and drop NAs
-    select(Factor_Excess, mkt_excess, smb, hml, rmw, cma, mom) %>%
-    na.omit()
-  
-  # --- B. Run Regression (if data exists) ---
-  if (nrow(regression_df) > 0) {
-    
-    # Run the 6-factor linear model
-    ff6_model <- lm(Factor_Excess ~ mkt_excess + smb + hml + rmw + cma + mom, 
-                    data = regression_df)
-    
-    # Tidy the model output into a clean data frame
-    factor_results <- tidy(ff6_model) %>%
-      select(term, estimate, p.value) %>%
-      # Rename intercept to 'Alpha' for clarity
-      mutate(term = recode(term, `(Intercept)` = "Alpha"))
-    
-    # --- C. Print Formatted Output ---
-    cat("\n")
-    cat("----------------------------------------\n")
-    cat(" Factor:", factor_name, "\n")
-    cat("----------------------------------------\n")
-    print(factor_results)
-    
-  } else {
-    # Skip if no data
-    cat("\n")
-    cat("----------------------------------------\n")
-    cat(" Factor:", factor_name, "\n")
-    cat("----------------------------------------\n")
-    cat("  Skipped - No complete data for regression.\n")
-  }
-}
-
 
 
 # New plot just using selected factors ------------------------------------
@@ -784,13 +655,11 @@ cat("--- Running 'Expanded Team' Strategy with", length(selected_factors), "fact
 print(selected_factors)
 
 # --- 1. Compute Selected Factor Momentum (UNSCALED) ---
-# We just need the output from calculate_momentum, not scale_volatility
 selected_factor_momentum <- calculate_momentum(final_merged_renamed, 
                                                selected_factors, 
                                                "Selected Factor Momentum")
 
 # --- 2. Combine with Industry Momentum and Plot (UNSCALED) ---
-# *** ASSUMPTION: 'industry_momentum' (unscaled) exists and has 'date', 'momentum_return', 'strategy_type' columns ***
 if (!is.null(industry_momentum) && !is.null(selected_factor_momentum)) {
   # Find the common start date
   common_start_date_selected_unscaled <- max(min(industry_momentum$date), min(selected_factor_momentum$date))
@@ -800,7 +669,6 @@ if (!is.null(industry_momentum) && !is.null(selected_factor_momentum)) {
     arrange(strategy_type, date) %>%
     group_by(strategy_type) %>%
     # Calculate cumulative return based on UNSCALED returns
-    # *** ASSUMPTION: The unscaled return column is named 'momentum_return' ***
     mutate(cumulative_return_unscaled_log = cumprod(1 + momentum_return)) %>%
     ungroup()
   
@@ -833,7 +701,6 @@ if (!is.null(industry_momentum) && !is.null(selected_factor_momentum)) {
 ---
   
   # --- 3. Plot Selected Factor Momentum vs. All Factor Momentum (UNSCALED) ---
-  # *** ASSUMPTION: 'factor_momentum' (unscaled "All Factors") exists and has 'date', 'momentum_return', 'strategy_type' columns ***
   if (!is.null(factor_momentum) && !is.null(selected_factor_momentum)) {
     # Find the common start date
     common_start_date_comparison_unscaled <- max(min(factor_momentum$date), min(selected_factor_momentum$date))
@@ -846,7 +713,6 @@ if (!is.null(industry_momentum) && !is.null(selected_factor_momentum)) {
       arrange(strategy_type, date) %>%
       group_by(strategy_type) %>%
       # Calculate cumulative return based on UNSCALED returns
-      # *** ASSUMPTION: The unscaled return column is named 'momentum_return' ***
       mutate(cumulative_return_unscaled_log = cumprod(1 + momentum_return)) %>%
       ungroup()
     
@@ -892,7 +758,6 @@ if (length(excluded_factors) >= 2) {
   excluded_factor_momentum <- NULL
 }
 # --- 5. Combine All Three Unscaled Strategies ---
-# *** ASSUMPTION: 'factor_momentum' (unscaled "All Factors") exists ***
 if (!is.null(factor_momentum) && 
     !is.null(selected_factor_momentum) && 
     !is.null(excluded_factor_momentum)) {
@@ -906,7 +771,6 @@ if (!is.null(factor_momentum) &&
   
   # Combine, relabeling strategy_type for clarity
   combined_momentum_all_three_unscaled <- bind_rows(
-    # *** FIX: Explicitly set strategy_type to match the scale_color_manual keys ***
     factor_momentum %>% mutate(strategy_type = "All Factors"), 
     selected_factor_momentum %>% mutate(strategy_type = "Selected Factors"), 
     excluded_factor_momentum %>% mutate(strategy_type = "Excluded Factors")
@@ -915,7 +779,6 @@ if (!is.null(factor_momentum) &&
     arrange(strategy_type, date) %>%
     group_by(strategy_type) %>%
     # Calculate cumulative return based on UNSCALED returns
-    # *** ASSUMPTION: The unscaled return column is named 'momentum_return' ***
     mutate(cumulative_return_unscaled_log = cumprod(1 + momentum_return)) %>%
     ungroup()
   
@@ -955,6 +818,7 @@ if (!is.null(factor_momentum) &&
 } else {
   print("Could not calculate all three unscaled momentum series; skipping combined plot.")
 }
+
 ###########################################################################
 
 # Show performance of every factor 
@@ -1010,7 +874,6 @@ spaghetti_plot_labeled <- spaghetti_plot +
   ) +
   xlim(min(all_factors_cumulative$date), max(all_factors_cumulative$date) + months(6)) # Extend x-axis for labels
 print(spaghetti_plot_labeled)
-
 
 
 # --- Top/Bottom 25% (Quartile) Momentum Strategy ---
@@ -1084,7 +947,6 @@ calculate_momentum_quartile <- function(df, target_cols, strategy_name) {
 
 
 # --- 2. Calculate Quartile Momentum Series ---
-# (Assumes 'final_merged_renamed', 'industry_cols', 'renamed_factor_cols' exist)
 industry_momentum_q <- calculate_momentum_quartile(final_merged_renamed, industry_cols, "Industry Momentum (Quartile)")
 factor_momentum_q <- calculate_momentum_quartile(final_merged_renamed, renamed_factor_cols, "Factor Momentum (Quartile)")
 
@@ -1127,7 +989,6 @@ if (!is.null(industry_momentum_q) && !is.null(factor_momentum_q)) {
 
 
 # --- 4. Apply Volatility Scaling to Quartile Strategies ---
-# (Assumes 'scale_volatility' function, 'target_vol', and 'lookback' exist)
 
 if (!is.null(industry_momentum_q)) {
   industry_momentum_q_scaled <- scale_volatility(industry_momentum_q,
@@ -1144,7 +1005,6 @@ if (!is.null(factor_momentum_q)) {
 } else {
   factor_momentum_q_scaled <- NULL
 }
-
 
 # --- 5. Combine and Plot SCALED Quartile Momentum ---
 if (!is.null(industry_momentum_q_scaled) && !is.null(factor_momentum_q_scaled)) {
@@ -1277,8 +1137,7 @@ if (!is.null(factor_momentum_scaled) && !is.null(factor_momentum_q_scaled)) {
 }
 
 
-
-# --- 11. Factor Momentum with 1-Month Execution Lag (signal at t, return at t+1) ---
+# --- Factor Momentum with 1-Month Execution Lag (signal at t, return at t+1) ---
 
 # Helper: momentum with execution lag
 calculate_momentum_lagged <- function(df, target_cols, strategy_name, execution_lag = 1) {
@@ -1397,7 +1256,7 @@ if (!is.null(industry_momentum) && !is.null(factor_momentum_lag1)) {
   print("Could not calculate both momentum series; skipping delayed plot.")
 }
 
-# (Optional) If you want the scaled plot too and scale_volatility() exists:
+# (Optional) 
 if (exists("scale_volatility")) {
   target_vol <- if (exists("target_vol")) target_vol else 0.10
   lookback   <- if (exists("lookback"))   lookback   else 36
@@ -1436,24 +1295,6 @@ if (exists("scale_volatility")) {
 
 
 ############## ROUND 2 CODE ####################
-# --- 0. Load Required Libraries ---
-# Data manipulation
-library(dplyr)
-library(tidyr)
-library(lubridate)
-library(stringr)
-library(purrr)     # For loops/mapping
-library(zoo)       # For rollapply
-library(broom)     # For tidying models
-
-# Fama-French data
-library(frenchdata)
-
-# Plotting
-library(ggplot2)
-library(scales)
-library(corrplot)
-library(RColorBrewer)
 
 # --- 1. Load and Prepare Factor/Theme Data ---
 # !!! IMPORTANT: SET YOUR FILE PATHS HERE !!!
