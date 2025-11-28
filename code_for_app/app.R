@@ -1,145 +1,136 @@
 # --- 0. Load Required Libraries ---
 library(shiny)
-library(shinymanager) # For password protection
+library(shinymanager) 
 library(dplyr)
 library(tidyr)
 library(lubridate)
 library(stringr)
-library(RSQLite) # <-- Added RSQLite
+library(RSQLite)
 library(ggplot2)
 library(scales)
 library(corrplot)
 library(RColorBrewer)
 library(zoo)
 library(broom)
+library(quantmod) # <-- Added for SP500 and Bond data
 
 # --- 1. Load Pre-processed Data Bundle ---
-# This file (quant_data.RData) must be in the same folder as app.R
 load("quant_data.RData")
-# This loads the 'app_data' list object we created in the prep script
 
-# --- 2. Extract Data Objects into Global Environment ---
+# --- 2. Extract Data Objects ---
 factor_rename_map <- app_data$factor_rename_map
 ff_reg_factors_loaded <- app_data$ff_reg_factors_loaded
 
-# --- 3. Define Credentials for Password Protection ---
-# === THIS SECTION IS NO LONGER NEEDED ===
-# We will read from the 'credentials.sqlite' file
+# --- 3. Helper Functions ---
 
-
-# --- 4. Helper Functions (Unchanged) ---
-calculate_momentum <- function(df, target_cols, strategy_name) {
-  if (length(target_cols) < 2) {
-    warning(paste("Skipping momentum for", strategy_name, "- less than 2 columns provided."))
-    return(NULL) # Return NULL if not enough columns
-  }
-  target_cols_exist <- intersect(target_cols, colnames(df))
-  if (length(target_cols_exist) < 2) {
-    warning(paste("Skipping momentum for", strategy_name, "- less than 2 valid columns found in dataframe."))
-    return(NULL) # Return NULL if not enough valid columns
-  }
+# Helper to fetch and process benchmarks
+get_benchmark_data <- function(start_date, end_date) {
+  # We fetch slightly earlier to ensure we have returns for the start date
+  fetch_from <- as.Date(start_date) - 45 
   
-  momentum_df <- df %>%
+  # 1. Fetch S&P 500
+  tryCatch({
+    sp500 <- getSymbols("^GSPC", src = "yahoo", from = fetch_from, auto.assign = FALSE)
+    sp500_m <- monthlyReturn(Cl(sp500), type = "log") # Log returns
+    
+    # Convert to Dataframe
+    df_sp <- data.frame(date = index(sp500_m), return = coredata(sp500_m)) %>%
+      rename(momentum_return = monthly.returns) %>%
+      mutate(strategy_type = "S&P 500") %>%
+      mutate(date = floor_date(date, "month")) # Align to 1st of month to match your data
+    
+  }, error = function(e) { return(NULL) })
+  
+  # 2. Fetch Bond Proxy (IEF - 7-10 Year Treasury) 
+  # Note: LUATRU is not on Yahoo. IEF is a standard proxy for intermediate treasuries.
+  tryCatch({
+    # IEF inception is approx 2002. If user selects 1990, this will just return available data.
+    bonds <- getSymbols("IEF", src = "yahoo", from = fetch_from, auto.assign = FALSE)
+    bonds_m <- monthlyReturn(Cl(bonds), type = "log")
+    
+    df_bnd <- data.frame(date = index(bonds_m), return = coredata(bonds_m)) %>%
+      rename(momentum_return = monthly.returns) %>%
+      mutate(strategy_type = "US Treasuries (IEF)") %>%
+      mutate(date = floor_date(date, "month"))
+    
+  }, error = function(e) { return(NULL) })
+  
+  # Combine
+  benchmarks <- bind_rows(df_sp, df_bnd) %>%
+    filter(date >= start_date & date <= end_date)
+  
+  return(benchmarks)
+}
+
+# Dynamic Momentum Calculation (Same as before)
+calculate_dynamic_momentum <- function(df, target_cols, strategy_name, lookback_months, skip_months, holding_period) {
+  target_cols_exist <- intersect(target_cols, colnames(df))
+  if (length(target_cols_exist) < 2) return(NULL)
+  
+  mom_df <- df %>%
     select(date, all_of(target_cols_exist)) %>%
     arrange(date) %>%
-    mutate(across(all_of(target_cols_exist), lag, .names = "{.col}_lag1")) %>%
-    filter(row_number() > 1) %>%
+    mutate(across(all_of(target_cols_exist), ~ log(1 + .), .names = "{.col}_logret")) %>%
+    mutate(across(ends_with("_logret"), 
+                  ~ zoo::rollsum(., k = lookback_months, fill = NA, align = "right"),
+                  .names = "{sub('_logret', '_signal', .col)}")) %>%
+    mutate(across(ends_with("_signal"), 
+                  ~ dplyr::lag(., n = skip_months))) %>%
     rowwise() %>%
-    mutate(median_lag1_ret = median(c_across(ends_with("_lag1")), na.rm = TRUE)) %>%
+    mutate(median_signal = median(c_across(ends_with("_signal")), na.rm = TRUE)) %>%
     ungroup() %>%
-    mutate(across(ends_with("_lag1"),
-                  ~ case_when(
-                    !is.na(.) & . > median_lag1_ret ~ 1,
-                    !is.na(.) & . <= median_lag1_ret ~ -1,
-                    TRUE ~ 0
-                  ),
-                  .names = "{sub('_lag1', '_pos', .col)}"
-    )) %>%
+    mutate(across(ends_with("_signal"),
+                  ~ case_when(!is.na(.) & . > median_signal ~ 1, !is.na(.) & . <= median_signal ~ -1, TRUE ~ 0),
+                  .names = "{sub('_signal', '_pos', .col)}")) %>%
     rowwise() %>%
-    mutate(
-      n_long = sum(c_across(ends_with("_pos")) == 1),
-      n_short = sum(c_across(ends_with("_pos")) == -1)
-    ) %>%
+    mutate(n_long = sum(c_across(ends_with("_pos")) == 1, na.rm=TRUE),
+           n_short = sum(c_across(ends_with("_pos")) == -1, na.rm=TRUE)) %>%
     ungroup() %>%
     mutate(across(ends_with("_pos"),
-                  ~ case_when(
-                    . == 1 & n_long > 0 ~ 1 / n_long,
-                    . == -1 & n_short > 0 ~ 1 / n_short,
-                    TRUE ~ 0
-                  ),
-                  .names = "{sub('_pos', '_wgt', .col)}"
-    )) %>%
+                  ~ case_when(. == 1 & n_long > 0 ~ 1 / n_long, . == -1 & n_short > 0 ~ 1 / n_short, TRUE ~ 0),
+                  .names = "{sub('_pos', '_wgt', .col)}")) %>%
     rowwise() %>%
-    mutate(
-      momentum_return = sum(
-        c_across(ends_with("_pos")) *
-          c_across(ends_with("_wgt")) *
-          c_across(all_of(target_cols_exist)),
-        na.rm = TRUE
-      )
-    ) %>%
-    ungroup() %>%
-    select(date, momentum_return) %>%
-    mutate(strategy_type = strategy_name)
+    mutate(raw_strat_ret = sum(c_across(ends_with("_pos")) * c_across(ends_with("_wgt")) * c_across(all_of(target_cols_exist)), na.rm = TRUE)) %>%
+    ungroup()
   
-  return(momentum_df)
+  if (holding_period > 1) {
+    mom_df <- mom_df %>% mutate(final_ret = zoo::rollmean(raw_strat_ret, k = holding_period, fill = NA, align = "right"))
+  } else {
+    mom_df <- mom_df %>% mutate(final_ret = raw_strat_ret)
+  }
+  
+  output <- mom_df %>%
+    select(date, momentum_return = final_ret) %>%
+    mutate(strategy_type = strategy_name) %>%
+    filter(!is.na(momentum_return))
+  
+  return(output)
 }
 
-scale_volatility <- function(df, target_ann_vol = 0.10, lookback_months = 36, min_obs = 12) {
-  if (!"momentum_return" %in% colnames(df)) {
-    stop("Input dataframe must contain 'momentum_return' column.")
-  }
-  if (!"date" %in% colnames(df)) {
-    stop("Input dataframe must contain 'date' column.")
-  }
-  df <- df %>% arrange(date)
-  
-  rolling_sd <- rollapply(df$momentum_return,
-                          width = lookback_months,
-                          FUN = sd,
-                          na.rm = TRUE,
-                          fill = NA,
-                          align = "right",
-                          partial = min_obs)
-  
-  annualized_rolling_vol <- rolling_sd * sqrt(12)
-  leverage_factor <- lag(pmin(5, target_ann_vol / annualized_rolling_vol, na.rm = TRUE), 1)
-  leverage_factor[is.infinite(leverage_factor) | is.na(leverage_factor)] <- 1
-  
-  df <- df %>%
-    mutate(
-      rolling_ann_vol = annualized_rolling_vol,
-      leverage = leverage_factor,
-      scaled_momentum_return = momentum_return * leverage
-    ) %>%
-    filter(!is.na(scaled_momentum_return))
-  
-  return(df)
-}
-
-
-# --- 5. Shiny UI (User Interface) ---
+# --- 5. Shiny UI ---
 ui <- shinymanager::secure_app(
-  shiny::tagList( # Add this tagList wrapper
+  shiny::tagList(
     shiny::fluidPage(
-      shiny::titlePanel("Quantitative Finance Lab: Factor Momentum Replication"),
+      shiny::titlePanel("Quant Lab: Dynamic Momentum vs Benchmarks"),
       
       shiny::sidebarLayout(
         shiny::sidebarPanel(
-          shiny::h4("App Secured"),
-          shiny::p("Data is pre-loaded. No uploads required."),
+          shiny::h4("1. Configuration"),
+          shiny::dateRangeInput("dateRange", "Select Analysis Period:",
+                                start = "2005-01-01", # Started later to ensure ETF data usually exists
+                                end = Sys.Date(),
+                                format = "yyyy-mm-dd"),
           
           shiny::tags$hr(),
-          shiny::h4("2. Adjust Parameters"),
-          shiny::sliderInput("volTarget", "Target Annual Volatility:",
-                             min = 0.05, max = 0.20, value = 0.10, step = 0.01, post = "%"),
-          shiny::sliderInput("lookback", "Volatility Lookback (Months):",
-                             min = 12, max = 60, value = 36, step = 1),
+          shiny::h4("2. Momentum Construction"),
+          shiny::sliderInput("lookback", "Formation Lookback (Months) [J]:", min = 1, max = 24, value = 12, step = 1),
+          shiny::sliderInput("skip", "Skip/Lag Period (Months):", min = 0, max = 3, value = 1, step = 1),
+          shiny::sliderInput("holding", "Holding Period (Months) [K]:", min = 1, max = 12, value = 1, step = 1),
           
           shiny::tags$hr(),
-          shiny::h4("3. Regression Analysis"),
-          shiny::uiOutput("factor_selector_ui"), # Dynamic selector
-          shiny::checkboxGroupInput("ffModelFactors", "Select Factors for Model:",
+          shiny::h4("3. Regression Settings"),
+          shiny::uiOutput("factor_selector_ui"),
+          shiny::checkboxGroupInput("ffModelFactors", "FF Model Factors:",
                                     choices = c("mkt_excess", "smb", "hml", "rmw", "cma", "mom"),
                                     selected = c("mkt_excess", "smb", "hml"))
         ),
@@ -147,198 +138,160 @@ ui <- shinymanager::secure_app(
         shiny::mainPanel(
           shiny::tabsetPanel(
             type = "tabs",
-            shiny::tabPanel("Momentum Performance",
-                            shiny::plotOutput("rawMomentumPlot", height = "400px"),
-                            shiny::plotOutput("scaledMomentumPlot", height = "400px")
+            shiny::tabPanel("Performance",
+                            shiny::br(),
+                            shiny::plotOutput("rawMomentumPlot", height = "500px"),
+                            shiny::br(),
+                            shiny::h5("Performance Summary"),
+                            shiny::tableOutput("perfStats"),
+                            shiny::p(style="font-size:0.8em; color:grey;", 
+                                     "Note: Benchmarks (SP500, Bonds) are fetched live from Yahoo Finance. Bonds proxy is IEF (7-10y Treasury).")
             ),
-            shiny::tabPanel("Factor Correlation",
-                            shiny::plotOutput("correlationHeatmap", height = "700px")
-            ),
-            shiny::tabPanel("Factor Regression",
-                            shiny::verbatimTextOutput("regressionSummary")
-            )
+            shiny::tabPanel("Correlations", shiny::plotOutput("correlationHeatmap", height = "700px")),
+            shiny::tabPanel("Regression", shiny::verbatimTextOutput("regressionSummary"))
           )
         )
       )
     ),
-    # Add a CSS tag to make the logout button visible
-    shiny::tags$head(shiny::tags$style(shiny::HTML(
-      ".shinymanager-logout { color: #337ab7; font-weight: bold; }"
-    )))
+    shiny::tags$head(shiny::tags$style(shiny::HTML(".shinymanager-logout { color: #337ab7; font-weight: bold; }")))
   )
 )
 
-
-# --- 6. Shiny Server (Backend Logic) ---
+# --- 6. Shiny Server ---
 server <- function(input, output, session) {
   
-  # --- 6.1. Add shinymanager Server-side Logic ---
-  # *** Pointing to the SQLite database ***
   res_auth <- shinymanager::secure_server(
     check_credentials = shinymanager::check_credentials(
-      db = "credentials.sqlite",
-      # *** UPDATED to your new passphrase ***
-      passphrase = "Ilab_member_12_1" 
+      db = "credentials.sqlite", passphrase = "Ilab_member_12_1" 
     )
   )
   
-  # --- 6.2. Reactive: Load Data from Pre-loaded List ---
-  data_list <- reactive({
-    app_data
+  data_list <- reactive({ app_data })
+  
+  # 6.2 Calculate Strategy Data
+  momentum_data_calc <- reactive({
+    data_obj <- data_list()
+    req(input$lookback, input$skip, input$holding)
+    
+    ind_mom <- calculate_dynamic_momentum(data_obj$data, data_obj$industry_cols, "Industry Momentum", input$lookback, input$skip, input$holding)
+    fac_mom <- calculate_dynamic_momentum(data_obj$data, data_obj$factor_cols, "Factor Momentum", input$lookback, input$skip, input$holding)
+    
+    bind_rows(ind_mom, fac_mom)
   })
   
-  # --- 6.3. Reactive: Calculate Raw Momentum (Unchanged) ---
-  raw_momentum_data <- reactive({
-    data_obj <- data_list() 
+  # 6.3 Fetch Benchmarks (Reactive to Date Change)
+  benchmark_data_calc <- reactive({
+    req(input$dateRange)
+    # Wrap in progress bar because fetching data takes a second
+    withProgress(message = 'Fetching Benchmark Data...', value = 0.5, {
+      get_benchmark_data(input$dateRange[1], input$dateRange[2])
+    })
+  })
+  
+  # 6.4 Merge and Normalize Data
+  final_plot_data <- reactive({
+    req(momentum_data_calc(), benchmark_data_calc(), input$dateRange)
     
-    industry_momentum <- calculate_momentum(data_obj$data, data_obj$industry_cols, "Industry Momentum")
-    factor_momentum <- calculate_momentum(data_obj$data, data_obj$factor_cols, "Factor Momentum")
+    # 1. Strategies
+    strat_df <- momentum_data_calc() %>%
+      filter(date >= input$dateRange[1], date <= input$dateRange[2])
     
-    req(industry_momentum, factor_momentum)
+    # 2. Benchmarks
+    bench_df <- benchmark_data_calc() 
     
-    common_start_date <- max(min(industry_momentum$date), min(factor_momentum$date))
-    
-    bind_rows(industry_momentum, factor_momentum) %>%
-      filter(date >= common_start_date) %>%
+    # 3. Combine
+    combined <- bind_rows(strat_df, bench_df) %>%
       arrange(strategy_type, date) %>%
       group_by(strategy_type) %>%
-      mutate(cumulative_return_log = cumprod(1 + momentum_return)) %>%
+      mutate(
+        cum_ret = cumprod(1 + momentum_return),
+        # Rebase each series to start at 1.0 on the first available date within the window
+        cum_ret_norm = cum_ret / first(cum_ret)
+      ) %>%
       ungroup()
+    
+    return(combined)
   })
   
-  # --- 6.4. Reactive: Calculate Scaled Momentum (Unchanged) ---
-  scaled_momentum_data <- reactive({
-    raw_data <- raw_momentum_data()
-    req(raw_data)
-    
-    target_vol <- input$volTarget
-    lookback <- input$lookback
-    
-    raw_data %>%
-      group_by(strategy_type) %>%
-      do(scale_volatility(., target_ann_vol = target_vol, lookback_months = lookback)) %>%
-      ungroup() %>%
-      filter(!is.null(scaled_momentum_return)) %>%
-      arrange(strategy_type, date) %>%
-      group_by(strategy_type) %>%
-      mutate(cumulative_return_scaled_log = cumprod(1 + scaled_momentum_return)) %>%
-      ungroup()
-  })
-  
-  # --- 6.5. Render Raw Momentum Plot (Unchanged) ---
+  # 6.5 Render Plot with Distinct Colors
   output$rawMomentumPlot <- renderPlot({
-    plot_data <- raw_momentum_data()
+    plot_data <- final_plot_data()
     req(nrow(plot_data) > 0)
     
-    ggplot(plot_data, aes(x = date, y = cumulative_return_log, color = strategy_type)) +
+    # Custom Colors: 
+    # Strategies = Blue Tones. SP500 = Red. Bonds = Gold/Orange.
+    custom_colors <- c(
+      "Industry Momentum" = "#2c7bb6",    # Medium Blue
+      "Factor Momentum"   = "#08306b",    # Dark Navy
+      "S&P 500"           = "#d73027",    # Dark Red
+      "US Treasuries (IEF)" = "#f46d43"   # Orange/Gold
+    )
+    
+    ggplot(plot_data, aes(x = date, y = cum_ret_norm, color = strategy_type)) +
       geom_line(linewidth = 1) +
-      scale_y_log10(breaks = scales::log_breaks(n = 10), labels = scales::label_number(accuracy = 0.1)) +
-      scale_color_manual(values = c("Industry Momentum" = "black", "Factor Momentum" = "blue")) +
+      scale_y_log10(labels = scales::label_number(accuracy = 0.01)) +
+      scale_color_manual(values = custom_colors) +
       labs(
-        title = "Cumulative Performance of Factor vs. Industry Momentum",
-        subtitle = "Value of $1 invested (Log Scale)",
-        x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+        title = paste0("Momentum (J=", input$lookback, ", K=", input$holding, ") vs Benchmarks"),
+        subtitle = "Cumulative Wealth (Log Scale) | Rebased to 1.0",
+        x = NULL, y = "Cumulative Wealth ($)", color = NULL
       ) +
       theme_minimal(base_size = 14) +
-      theme(legend.position = "bottom",
-            plot.title = element_text(hjust = 0.5),
-            plot.subtitle = element_text(hjust = 0.5))
+      theme(
+        legend.position = "bottom",
+        legend.text = element_text(size = 11),
+        plot.title = element_text(face="bold")
+      )
   })
   
-  # --- 6.6. Render Scaled Momentum Plot (Unchanged) ---
-  output$scaledMomentumPlot <- renderPlot({
-    plot_data_scaled <- scaled_momentum_data()
-    req(nrow(plot_data_scaled) > 0)
+  # 6.6 Render Performance Stats
+  output$perfStats <- renderTable({
+    df <- final_plot_data()
+    req(nrow(df) > 0)
     
-    target_vol_label <- scales::percent(input$volTarget, accuracy = 1)
-    
-    ggplot(plot_data_scaled, aes(x = date, y = cumulative_return_scaled_log, color = strategy_type)) +
-      geom_line(linewidth = 1) +
-      scale_y_log10(breaks = scales::log_breaks(n = 10), labels = scales::label_number(accuracy = 0.1)) +
-      scale_color_manual(values = c("Industry Momentum" = "black", "Factor Momentum" = "blue")) +
-      labs(
-        title = paste0("Cumulative Performance (Scaled to ", target_vol_label, " Ann. Volatility)"),
-        subtitle = paste0("Value of $1 invested (Log Scale) | Lookback: ", input$lookback, " months"),
-        x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
-      ) +
-      theme_minimal(base_size = 14) +
-      theme(legend.position = "bottom",
-            plot.title = element_text(hjust = 0.5),
-            plot.subtitle = element_text(hjust = 0.5))
-  })
+    df %>%
+      group_by(Strategy = strategy_type) %>%
+      summarise(
+        `Total Return` = scales::percent(last(cum_ret_norm) - 1, accuracy=0.1),
+        `Ann. Return` = scales::percent((last(cum_ret_norm)^(12/n()) - 1), accuracy=0.1),
+        `Ann. Vol` = scales::percent(sd(momentum_return) * sqrt(12), accuracy=0.1),
+        `Sharpe` = round((mean(momentum_return) * 12) / (sd(momentum_return) * sqrt(12)), 2)
+      )
+  }, digits = 2)
   
-  # --- 6.7. Render Correlation Heatmap (Unchanged) ---
+  # 6.7 Correlation Heatmap (Unchanged)
   output$correlationHeatmap <- renderPlot({
     data_obj <- data_list()
-    req(data_obj$factor_cols)
-    
-    factor_data_for_corr <- data_obj$data %>%
-      select(any_of(data_obj$factor_cols)) %>%
-      na.omit()
-    
-    req(ncol(factor_data_for_corr) >= 2)
-    
-    cor_matrix <- cor(factor_data_for_corr) # <-- FIX 2: Removed '.x ='
-    col_palette <- colorRampPalette(brewer.pal(n = 11, name = "BrBG"))(200)
-    
-    corrplot(cor_matrix,
-             method = "color",
-             type = "upper",
-             order = "original",
-             addCoef.col = "black",
-             tl.col = "black",
-             tl.srt = 45,
-             tl.cex = 0.7,
-             number.cex = 0.5,
-             col = col_palette,
-             diag = FALSE,
-             cl.cex = 0.8,
-             mar = c(0,0,1,0),
-             title = "Correlation Heatmap of JKP Factors"
-    )
+    factor_data_for_corr <- data_obj$data %>% select(any_of(data_obj$factor_cols)) %>% na.omit()
+    cor_matrix <- cor(factor_data_for_corr)
+    corrplot(cor_matrix, method = "color", type = "upper", order = "original",
+             tl.col = "black", tl.cex = 0.7, col = colorRampPalette(brewer.pal(n=11, name="BrBG"))(200),
+             diag = FALSE, title = "JKP Factor Correlation")
   })
   
-  # --- 6.8. Render Dynamic UI for Factor Selector (Unchanged) ---
+  # 6.8 Regression Logic (Unchanged)
   output$factor_selector_ui <- renderUI({
     data_obj <- data_list()
-    req(data_obj$factor_cols)
-    
-    shiny::selectInput("jkpFactor", "Select JKP Factor (Dependent Var):",
-                       choices = sort(data_obj$factor_cols),
-                       selected = "Book_to_Market_HML")
+    shiny::selectInput("jkpFactor", "Target Factor:", choices = sort(data_obj$factor_cols), selected = "Book_to_Market_HML")
   })
   
-  # --- 6.9. Render Regression Summary (Unchanged) ---
   output$regressionSummary <- renderPrint({
     data_obj <- data_list()
     req(input$jkpFactor, input$ffModelFactors, ff_reg_factors_loaded)
     
-    jkp_data <- data_obj$data %>%
-      select(date, all_of(input$jkpFactor))
-    
+    jkp_data <- data_obj$data %>% select(date, all_of(input$jkpFactor))
     reg_data <- jkp_data %>%
       inner_join(ff_reg_factors_loaded, by = "date") %>%
       mutate(Factor_Excess = .data[[input$jkpFactor]] - rf) %>%
-      na.omit()
-    
-    req(nrow(reg_data) > 0, length(input$ffModelFactors) > 0)
+      na.omit() %>%
+      filter(date >= input$dateRange[1], date <= input$dateRange[2])
     
     formula_str <- paste("Factor_Excess ~", paste(input$ffModelFactors, collapse = " + "))
     model <- lm(as.formula(formula_str), data = reg_data)
     
-    cat("--- Regression Summary ---\n\n")
-    cat("Dependent Variable (JKP Factor):", input$jkpFactor, "(Excess Return)\n")
-    cat("Independent Variables:", paste(input$ffModelFactors, collapse = ", "), "\n")
-    cat("Sample Period:", as.character(min(reg_data$date)), "to", as.character(max(reg_data$date)), "\n")
-    cat("----------------------------------\n\n")
-    
     print(summary(model))
-    
-    cat("\n--- Model Fit (Glance) ---\n")
-    print(glance(model))
   })
-  
 }
 
-# --- 7. Run the App ---
+# --- 7. Run App ---
 shinyApp(ui = ui, server = server)
