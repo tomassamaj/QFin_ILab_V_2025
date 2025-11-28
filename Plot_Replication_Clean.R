@@ -1504,49 +1504,133 @@ calculate_momentum_strategy <- function(df, target_cols,
 }
 
 
-# --- 8. Analyze Long vs. Short Legs (and 2000s Bubble) ---
-print("--- 8. Running Long/Short Decomposition (1M/1M, Median) ---")
 
-# Base case: 1M lookback, 1M hold, 1M lag, median split
-base_factor_mom <- calculate_momentum_strategy(final_merged_renamed, 
-                                               renamed_factor_cols,
-                                               lookback_months = 1,
-                                               holding_months = 1,
-                                               signal_lag = 1,
-                                               long_quantile = 0.5,
-                                               short_quantile = 0.5)
 
-# Prepare data for plotting
+
+# --- 8. Analyze Long vs. Short Legs (Corrected Calculation) ---
+print("--- 8. Running Long/Short Decomposition (1M/1M, Median) - Inline Calculation ---")
+
+# Define Strategy Parameters
+lookback_months <- 1
+holding_months  <- 1
+signal_lag      <- 1
+long_quantile   <- 0.5
+short_quantile  <- 0.5
+
+# 1. Calculate Signals (Past 1-month cumulative log returns)
+signals <- final_merged_renamed %>%
+  select(date, all_of(renamed_factor_cols)) %>%
+  arrange(date) %>%
+  mutate(across(all_of(renamed_factor_cols), 
+                ~ rollapply(log(1 + .), width = lookback_months, FUN = sum, fill = NA, align = "right"),
+                .names = "{.col}_sig")) %>%
+  mutate(across(ends_with("_sig"), ~ lag(., n = signal_lag))) # Lag signal by 1 month
+
+# 2. Calculate Forward Returns (Next 1-month cumulative log returns)
+returns <- final_merged_renamed %>%
+  select(date, all_of(renamed_factor_cols)) %>%
+  arrange(date) %>%
+  mutate(across(all_of(renamed_factor_cols), 
+                ~ rollapply(log(1 + .), width = holding_months, FUN = sum, fill = NA, align = "left"),
+                .names = "{.col}_ret")) %>%
+  select(date, ends_with("_ret"))
+
+# 3. Merge and Calculate Portfolio Returns (Arithmetic Mean Fix)
+# We calculate explicitly here to ensure Arithmetic Mean is used (fixing "too smooth" issue)
+base_factor_mom <- inner_join(signals, returns, by = "date") %>%
+  na.omit() %>%
+  rowwise() %>%
+  mutate(
+    # Extract signal and return vectors for the current row (date)
+    sigs = list(c_across(ends_with("_sig"))),
+    rets = list(c_across(ends_with("_ret"))),
+    
+    # Calculate Portfolio Returns
+    port_res = list({
+      # Thresholds for median split
+      q_l = quantile(sigs, long_quantile, na.rm=TRUE)
+      q_s = quantile(sigs, short_quantile, na.rm=TRUE)
+      
+      # Identify assets for Long and Short baskets
+      if (long_quantile == 0.5) {
+        idx_l <- which(sigs > q_l)  # Top 50%
+        idx_s <- which(sigs <= q_s) # Bottom 50%
+      } else {
+        idx_l <- which(sigs >= q_l)
+        idx_s <- which(sigs <= q_s)
+      }
+      
+      # *** CRITICAL FIX: Convert Log Returns to Simple Returns BEFORE Averaging ***
+      # Averaging log returns = Geometric Mean (Variance Drag). 
+      # Averaging simple returns = Arithmetic Mean (Correct Portfolio Return).
+      simple_rets <- exp(rets) - 1
+      
+      # Calculate Arithmetic Mean (Equal Weight)
+      r_long  <- if(length(idx_l)>0) mean(simple_rets[idx_l]) else 0
+      r_short <- if(length(idx_s)>0) mean(simple_rets[idx_s]) else 0
+      
+      tibble(
+        long_return = r_long,
+        short_return = r_short,
+        long_short_return = r_long - r_short
+      )
+    })
+  ) %>%
+  ungroup() %>%
+  select(date, port_res) %>%
+  unnest(port_res)
+
+# 4. Prepare Data for Plotting
 plot_data_ls <- base_factor_mom %>%
   select(date, long_return, short_return, long_short_return) %>%
-  # Invert short return for plotting
+  # Invert short return: We want to show the PnL of the short leg.
+  # (e.g., if Short basket returns -5%, Strategy makes +5%)
   mutate(short_return_inv = -short_return) %>%
   pivot_longer(-date, names_to = "Strategy", values_to = "Return") %>%
+  filter(Strategy %in% c("long_return", "short_return_inv", "long_short_return")) %>%
   group_by(Strategy) %>%
+  arrange(date) %>%
   mutate(Cumulative_Return = cumprod(1 + Return)) %>%
-  ungroup() %>%
-  filter(Strategy %in% c("long_return", "short_return_inv", "long_short_return"))
+  ungroup()
 
-# Plot Long vs. Short
-ls_plot <- ggplot(plot_data_ls, aes(x = date, y = Cumulative_Return, color = Strategy)) +
-  # --- ADDED: Highlight for 2000s bubble ---
+# 5. Add explicit Start Date (t=0) at 1.0 for clean plotting
+start_date_plot <- min(plot_data_ls$date) - months(1)
+start_rows <- tibble(
+  date = start_date_plot,
+  Strategy = unique(plot_data_ls$Strategy),
+  Return = 0,
+  Cumulative_Return = 1.0
+)
+plot_data_final <- bind_rows(start_rows, plot_data_ls) %>% arrange(Strategy, date)
+
+# 6. Plot
+ls_plot <- ggplot(plot_data_final, aes(x = date, y = Cumulative_Return, color = Strategy)) +
+  # Highlight: Dot-com bubble (approx Mar 2000 - Oct 2002)
   annotate("rect", 
            xmin = ymd("2000-03-01"), xmax = ymd("2002-10-01"), 
-           ymin = min(plot_data_ls$Cumulative_Return), ymax = max(plot_data_ls$Cumulative_Return),
+           ymin = min(plot_data_final$Cumulative_Return, na.rm=T), 
+           ymax = max(plot_data_final$Cumulative_Return, na.rm=T),
            alpha = 0.2, fill = "gray50") +
   geom_line(linewidth = 1) +
-  scale_y_log10(labels = scales::comma) +
-  scale_color_manual(values = c("long_return" = "darkgreen", 
-                                "short_return_inv" = "darkred", 
-                                "long_short_return" = "blue"),
-                     labels = c("Long-Only Leg", "Long-Short Strategy", "Short-Only Leg (Inverted)")) +
-  labs(title = "Factor Momentum: Long vs. Short Leg Performance",
-       subtitle = "1M/1M Strategy, Median Split. Shaded area = 2000-2002 Dot-com bubble burst.",
-       x = "Year", y = "Cumulative Return (Log Scale)") +
-  theme_minimal() +
+  scale_y_log10(labels = scales::comma, breaks = scales::log_breaks(n = 10)) +
+  scale_color_manual(
+    values = c("long_return" = "darkgreen", 
+               "short_return_inv" = "darkred", 
+               "long_short_return" = "blue"),
+    labels = c("Long-Only Leg", "Long-Short Strategy", "Short-Only Leg (Inverted)")
+  ) +
+  labs(
+    title = "Factor Momentum: Long vs. Short Leg Performance (Arnott et al. 2023 Replication)",
+    subtitle = "1M/1M Strategy, Median Split. Short Leg inverted to show PnL contribution.",
+    x = "Year", 
+    y = "Cumulative Return (Log Scale, Start=1)"
+  ) +
+  theme_minimal(base_size = 12) +
   theme(legend.position = "bottom")
 
 print(ls_plot)
+
+
 
 
 # --- 9. Sensitivity Analysis (Grid) ---
@@ -1596,21 +1680,33 @@ print("Sensitivity Results (Sharpe Ratios):")
 print(sensitivity_results %>% arrange(-Sharpe_Ratio), n = 24)
 
 
-# --- 10. Factor Cluster Analysis ---
+
+
+
+
+
+
+
+# ==============================================================================
+# 10. FACTOR CLUSTER ANALYSIS (CORRECTED)
+# ==============================================================================
 print("--- 10. Running Factor Cluster Analysis ---")
 
-# 1. Create correlation matrix
+# --- 10.1. Correlation & Clustering ---
+
+# Create correlation matrix
 factor_data_for_corr <- final_merged_renamed %>%
   select(any_of(renamed_factor_cols)) %>%
   na.omit()
+
 cor_matrix <- cor(factor_data_for_corr)
 
-# 2. Perform clustering
-dist_matrix <- as.dist(1 - abs(cor_matrix)) # Use absolute correlation for distance
+# Perform clustering
+# Using 1 - abs(correlation) as distance so highly negative correlated factors cluster together
+dist_matrix <- as.dist(1 - abs(cor_matrix)) 
 hclust_results <- hclust(dist_matrix, method = "ward.D2")
-plot(hclust_results, main = "Factor Cluster Dendrogram", xlab = "", sub = "")
 
-# 3. Cut tree into 5 clusters
+# Cut tree into 5 clusters
 K_CLUSTERS <- 5
 clusters <- cutree(hclust_results, k = K_CLUSTERS)
 cluster_list <- map(1:K_CLUSTERS, ~names(clusters[clusters == .x]))
@@ -1619,37 +1715,193 @@ names(cluster_list) <- paste0("Cluster_", 1:K_CLUSTERS)
 print("Factor Clusters:")
 print(cluster_list)
 
-# 4. Run momentum strategy on each cluster
-cluster_momentum_performance <- map_dfr(cluster_list, ~{
-  strategy_returns <- calculate_momentum_strategy(
-    df = final_merged_renamed,
-    target_cols = .x, # Pass the vector of factor names for this cluster
-    lookback_months = 1,
-    holding_months = 1,
-    signal_lag = 1,
-    long_quantile = 0.5,
-    short_quantile = 0.5
-  )
-  if (is.null(strategy_returns)) return(NULL)
-  strategy_returns %>% mutate(Return = long_short_return)
+# --- 10.2. Calculate Momentum for Each Cluster (Using Inline Logic) ---
+
+# Define fixed parameters for cluster comparison
+lookback_months <- 1
+holding_months  <- 1
+signal_lag      <- 1
+long_quantile   <- 0.5
+short_quantile  <- 0.5
+
+cluster_momentum_performance <- map_dfr(cluster_list, function(cluster_factors) {
+  
+  target_cols_exist <- intersect(cluster_factors, colnames(final_merged_renamed))
+  if (length(target_cols_exist) < 2) return(NULL)
+  
+  # 1. Signal Generation
+  signals <- final_merged_renamed %>%
+    select(date, all_of(target_cols_exist)) %>%
+    arrange(date) %>%
+    mutate(across(all_of(target_cols_exist), 
+                  ~ rollapply(log(1 + .), width = lookback_months, FUN = sum, fill = NA, align = "right"),
+                  .names = "{.col}_sig")) %>%
+    mutate(across(ends_with("_sig"), ~ lag(., n = signal_lag)))
+  
+  # 2. Forward Returns
+  returns <- final_merged_renamed %>%
+    select(date, all_of(target_cols_exist)) %>%
+    arrange(date) %>%
+    mutate(across(all_of(target_cols_exist), 
+                  ~ rollapply(log(1 + .), width = holding_months, FUN = sum, fill = NA, align = "left"),
+                  .names = "{.col}_ret")) %>%
+    select(date, ends_with("_ret"))
+  
+  # 3. Merge & Filter
+  full_dat <- inner_join(signals, returns, by = "date") %>% na.omit()
+  
+  # 4. Portfolio Calculation (Arithmetic Mean Fix)
+  strat_ret <- full_dat %>%
+    rowwise() %>%
+    mutate(
+      res = list({
+        sigs <- c_across(ends_with("_sig"))
+        rets <- c_across(ends_with("_ret"))
+        
+        q_l = quantile(sigs, long_quantile, na.rm=TRUE)
+        q_s = quantile(sigs, short_quantile, na.rm=TRUE)
+        
+        if (long_quantile == 0.5) {
+          idx_l <- which(sigs > q_l); idx_s <- which(sigs <= q_s)
+        } else {
+          idx_l <- which(sigs >= q_l); idx_s <- which(sigs <= q_s)
+        }
+        
+        # Convert to simple returns
+        simple_rets <- exp(rets) - 1
+        
+        ret_l <- if(length(idx_l)>0) mean(simple_rets[idx_l]) else 0
+        ret_s <- if(length(idx_s)>0) mean(simple_rets[idx_s]) else 0
+        
+        tibble(long_return = ret_l, 
+               short_return = ret_s, 
+               long_short_return = ret_l - ret_s)
+      })
+    ) %>%
+    ungroup() %>%
+    select(date, res) %>%
+    unnest(res)
+  
+  return(strat_ret)
 }, .id = "Cluster")
 
-# 5. Plot cluster momentum performance
+# --- 10.3. Plot A: Momentum Performance by Factor Cluster ---
+print("--- Plotting 10a: Momentum Performance by Cluster ---")
+
+# Prepare Data
 cluster_plot_data <- cluster_momentum_performance %>%
+  select(Cluster, date, Return = long_short_return) %>%
+  na.omit()
+
+# Find Common Start Date (Preserving Date Class)
+start_dates_a <- cluster_plot_data %>%
   group_by(Cluster) %>%
+  summarise(first_date = min(date))
+
+common_start_date_a <- max(start_dates_a$first_date)
+
+# Filter & Cumulate
+cluster_plot_data <- cluster_plot_data %>%
+  filter(date >= common_start_date_a) %>%
+  group_by(Cluster) %>%
+  arrange(date) %>%
   mutate(Cumulative_Return = cumprod(1 + Return)) %>%
   ungroup()
 
-cluster_plot <- ggplot(cluster_plot_data, aes(x = date, y = Cumulative_Return, color = Cluster)) +
-  geom_line() +
-  scale_y_log10(labels = scales::comma) +
+# Add Start Date (t=0) at 1.0
+start_rows_a <- tibble(
+  date = common_start_date_a %m-% months(1),
+  Cluster = unique(cluster_plot_data$Cluster),
+  Return = 0,
+  Cumulative_Return = 1.0
+)
+
+cluster_plot_final_a <- bind_rows(start_rows_a, cluster_plot_data) %>%
+  arrange(Cluster, date)
+
+# Plot
+cluster_plot <- ggplot(cluster_plot_final_a, aes(x = date, y = Cumulative_Return, color = Cluster)) +
+  geom_line(linewidth = 0.8) +
+  scale_y_log10(labels = scales::comma, breaks = scales::log_breaks(n = 10)) +
   labs(title = "Momentum Performance by Factor Cluster",
-       subtitle = "1M/1M Strategy, Median Split",
+       subtitle = "1M/1M Strategy, Median Split. Normalized start at 1.0.",
+       x = "Year", y = "Cumulative Return (Log Scale, Start=1)") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+print(cluster_plot)
+
+
+# --- 10.4. Plot B: Long vs. Short vs. Net Performance (Faceted) ---
+print("--- Plotting 10b: Long/Short Legs by Cluster ---")
+
+# Prepare Data for Faceted Plot
+cluster_ls_data <- cluster_momentum_performance %>%
+  select(Cluster, date, long_return, short_return, long_short_return) %>%
+  # Invert short return to show PnL contribution
+  mutate(short_return_inv = -short_return) %>%
+  pivot_longer(
+    cols = c("long_return", "short_return_inv", "long_short_return"), 
+    names_to = "Strategy", 
+    values_to = "Return"
+  ) %>%
+  na.omit() 
+
+# Find Common Start Date
+start_dates_b <- cluster_ls_data %>%
+  group_by(Cluster) %>%
+  summarise(first_date = min(date))
+
+common_start_date_b <- max(start_dates_b$first_date)
+
+# Filter & Cumulate
+cluster_ls_data <- cluster_ls_data %>%
+  filter(date >= common_start_date_b) %>%
+  group_by(Cluster, Strategy) %>%
+  arrange(date) %>%
+  mutate(Cumulative_Return = cumprod(1 + Return)) %>%
+  ungroup()
+
+# Add Start Date (t=0) at 1.0
+start_rows_b <- tibble(
+  date = common_start_date_b %m-% months(1),
+  # Create all combinations of Cluster and Strategy for the start row
+  expand.grid(Cluster = unique(cluster_ls_data$Cluster), 
+              Strategy = unique(cluster_ls_data$Strategy)),
+  Return = 0,
+  Cumulative_Return = 1.0
+)
+
+cluster_ls_final_b <- bind_rows(start_rows_b, cluster_ls_data) %>%
+  arrange(Cluster, Strategy, date)
+
+# Plot Faceted
+cluster_ls_plot <- ggplot(cluster_ls_final_b, aes(x = date, y = Cumulative_Return, color = Strategy)) +
+  geom_line(linewidth = 0.8) +
+  # Facet by Cluster
+  facet_wrap(~ Cluster, scales = "free_y", ncol = 2) + 
+  scale_y_log10(labels = scales::comma) +
+  scale_color_manual(values = c("long_return" = "darkgreen", 
+                                "short_return_inv" = "darkred", 
+                                "long_short_return" = "blue"),
+                     labels = c("Long-Only", "Long-Short", "Short-Only (Inv)")) +
+  labs(title = "Factor Momentum: Long vs. Short Leg Performance by Cluster",
+       subtitle = "1M/1M Strategy, Median Split. Normalized start at 1.0.",
        x = "Year", y = "Cumulative Return (Log Scale)") +
   theme_minimal() +
   theme(legend.position = "bottom")
 
-print(cluster_plot)
+print(cluster_ls_plot)
+
+
+
+
+
+
+
+
+
+
 
 
 # --- 11. Drawdown and Crisis Analysis ---
