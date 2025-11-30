@@ -819,7 +819,7 @@ if (!is.null(factor_momentum) &&
   print("Could not calculate all three unscaled momentum series; skipping combined plot.")
 }
 
-###########################################################################
+# -------------------------00--
 
 # Show performance of every factor 
 
@@ -1687,9 +1687,9 @@ print(sensitivity_results %>% arrange(-Sharpe_Ratio), n = 24)
 
 
 
-# ==============================================================================
+# -------------------------00--
 # 10. FACTOR CLUSTER ANALYSIS (CORRECTED)
-# ==============================================================================
+# -------------------------00--
 print("--- 10. Running Factor Cluster Analysis ---")
 
 # --- 10.1. Correlation & Clustering ---
@@ -2068,5 +2068,131 @@ scaled_sharpe <- (mean(scaled_factor_mom$scaled_return) * 12) /
   (sd(scaled_factor_mom$scaled_return) * sqrt(12))
 
 print(paste("Scaled Strategy (", TARGET_VOL*100, "% Vol) Sharpe Ratio:", round(scaled_sharpe, 3)))
+
+
+
+
+
+
+# -------------------------00--
+# 14. PRINCIPAL COMPONENT ANALYSIS (PCA) - CORRECTED & SCALED
+# -------------------------00--
+print("--- 14. Running Principal Component Analysis (PCA) ---")
+
+# --- 1. Prepare Data for PCA ---
+# Reuse the correlation matrix data frame, ensuring it is complete (no NAs)
+pca_data_complete <- final_merged_renamed %>%
+  select(date, all_of(renamed_factor_cols)) %>%
+  na.omit()
+factor_returns_matrix <- pca_data_complete %>% select(-date)
+
+# --- 2. Run PCA ---
+# scale=TRUE standardizes inputs (Mean=0, SD=1). 
+# This is correct for extraction, but the output scores will have huge volatility.
+pca_results <- prcomp(factor_returns_matrix, scale = TRUE)
+
+# --- 3. Determine Number of PCs (80% explained variance heuristic) ---
+variance_explained <- (pca_results$sdev^2) / sum(pca_results$sdev^2)
+cumulative_variance <- cumsum(variance_explained)
+num_pcs <- min(which(cumulative_variance >= 0.80))
+cat(paste("\nNumber of PCs explaining >= 80% of variance:", num_pcs, "\n"))
+
+# --- 4. Extract AND RESCALE PC Returns ---
+# CRITICAL STEP: Convert PCA scores (SD=1) back to realistic financial returns (10% Ann Vol)
+target_monthly_sd <- 0.10 / sqrt(12) # approx 0.0288 (2.88% monthly)
+
+pc_returns_raw <- as.data.frame(pca_results$x)
+
+# Rescale every PC column to have 10% annualized volatility
+pc_returns_scaled <- pc_returns_raw %>%
+  mutate(across(everything(), ~ .x * (target_monthly_sd / sd(.x)))) %>%
+  bind_cols(date = pca_data_complete$date, .) # Add date back
+
+# --- 5. Select Top PCs (Fixing the Index Error) ---
+# We want columns 2 (PC1) through num_pcs + 1 (PC5)
+# Because column 1 is 'date'
+pc_cols_to_trade <- names(pc_returns_scaled)[2:(num_pcs + 1)] 
+
+print(paste("Trading the following PCs:", paste(pc_cols_to_trade, collapse=", ")))
+
+# --- 6. Calculate Factor Momentum on the SCALED PCs ---
+pc_factor_momentum <- calculate_momentum(pc_returns_scaled, 
+                                         pc_cols_to_trade, 
+                                         paste0("PCA Momentum (Top ", num_pcs, " PCs)"))
+
+# --- 7. Combine with All Factor Momentum for Comparison ---
+if (!is.null(pc_factor_momentum) && !is.null(factor_momentum_raw)) {
+  
+  # We need to filter the raw momentum to match the PCA start date
+  common_start <- max(min(factor_momentum_raw$date), min(pc_factor_momentum$date))
+  
+  combined_pca_comp <- bind_rows(
+    factor_momentum_raw %>% mutate(strategy_type = "All Factor Momentum"), 
+    pc_factor_momentum
+  ) %>%
+    filter(date >= common_start) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    # Calculate cumulative return
+    mutate(cumulative_return_log = cumprod(1 + momentum_return)) %>%
+    ungroup()
+  
+  # --- PLOTTING ---
+  plot_pca_comp <- ggplot(combined_pca_comp, 
+                          aes(x = date, y = cumulative_return_log, color = strategy_type)) +
+    geom_line(linewidth = 1) +
+    # Use log10 scale, but handle potential zeros if drawdowns are deep
+    scale_y_log10(
+      breaks = scales::log_breaks(n = 10),
+      labels = scales::label_number(accuracy = 0.1)
+    ) +
+    scale_color_manual(values = c("All Factor Momentum" = "blue", 
+                                  # Dynamic name matching
+                                  setNames("darkorange", paste0("PCA Momentum (Top ", num_pcs, " PCs)")))) +
+    labs(
+      title = "Cumulative Performance: PCA Factor Momentum vs. All Factors",
+      subtitle = paste0("PCA Returns Scaled to 10% Volatility. Top ", num_pcs, " PCs used."),
+      x = "Year", y = "Cumulative Performance ($)", color = "Strategy"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "top",
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  print(plot_pca_comp)
+  
+} else {
+  print("Could not calculate PCA momentum; skipping comparison plot.")
+}
+
+
+# "Spanning Regression"
+# You now have the visual proof that PCA Momentum tracks All Factor Momentum. To scientifically "close" Phase 1, you need the statistical proof.
+
+# Does the simple PCA strategy explain the complex All Factor strategy?
+if (!is.null(pc_factor_momentum) && !is.null(factor_momentum_raw)) {
+  
+  # Merge the two strategies on date
+  regression_data <- inner_join(
+    factor_momentum_raw %>% select(date, all_factor_mom = momentum_return),
+    pc_factor_momentum %>% select(date, pca_mom = momentum_return),
+    by = "date"
+  )
+  
+  # Run regression: All Factor Momentum ~ PCA Momentum
+  spanning_regression <- lm(all_factor_mom ~ pca_mom, data = regression_data)
+  
+  print(summary(spanning_regression))
+  
+} else {
+  print("Could not perform spanning regression; missing momentum data.")
+}
+
+
+
+
+
 
 
