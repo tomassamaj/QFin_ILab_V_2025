@@ -2192,7 +2192,327 @@ if (!is.null(pc_factor_momentum) && !is.null(factor_momentum_raw)) {
 
 
 
+######################## DAILY DATA REPLICATION SECTION BELOW ########################
+# --- 0. Libraries ---
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(zoo)
+library(ggplot2)
+library(scales)
+library(frenchdata)
+
+# --- 1. Load and Clean DAILY Data (Robust Version) ---
+load("Daily_Factor_and_Themes_Data.RData")
+
+# Load and merge
+d_factors <- all_factors_daily_vw_cap %>% mutate(date = ymd(date))
+d_themes  <- all_themes_daily_vw_cap %>% mutate(date = ymd(date))
 
 
 
+# Merge and Pivot
+daily_data <- bind_rows(d_factors, d_themes) %>%
+  select(date, name, ret) %>%
+  pivot_wider(names_from = name, values_from = ret) %>%
+  arrange(date)
 
+# *** CRITICAL FIX: Force numeric conversion on all factor columns ***
+# We exclude 'date' from this operation.
+daily_data_numeric <- daily_data %>%
+  mutate(across(-date, ~ as.numeric(as.character(.)))) %>%
+  na.omit() # Drop rows with any NAs (e.g. early history)
+
+# Rename columns using your map
+# (Assuming factor_rename_map is defined from previous steps)
+if(exists("factor_rename_map")) {
+  daily_data_numeric <- daily_data_numeric %>% 
+    rename(any_of(factor_rename_map))
+}
+
+# Update target columns based on what survived the numeric conversion
+target_cols <- setdiff(names(daily_data_numeric), "date")
+
+print(paste("Loaded daily data for", length(target_cols), "factors."))
+
+# --- 2. Signal Calculation (Daily Rolling) ---
+LOOKBACK_DAYS <- 21 # ~1 Month
+EXECUTION_LAG <- 1  # 1 Day Lag
+
+daily_signals <- daily_data_numeric %>%
+  select(date, all_of(target_cols)) %>%
+  mutate(across(all_of(target_cols), 
+                # Rolling 21-day cumulative log return
+                ~ rollapply(log(1 + .), width = LOOKBACK_DAYS, FUN = sum, fill = NA, align = "right"),
+                .names = "{.col}_sig_raw")) %>%
+  # Apply 1-day Execution Lag to the Signal
+  mutate(across(ends_with("_sig_raw"), ~ lag(., n = EXECUTION_LAG))) %>%
+  na.omit()
+
+# --- 3. Resample to Monthly Rebalancing ---
+# Get last trading day of each month
+rebal_dates_df <- daily_signals %>%
+  mutate(month = floor_date(date, "month")) %>%
+  group_by(month) %>%
+  filter(date == max(date)) %>%
+  ungroup() %>%
+  select(date, ends_with("_sig_raw"))
+
+# --- 4. Calculate Forward Monthly Returns ---
+# Calculate NEXT month's return from daily data
+# Logic: Aggregate daily returns for Month T+1
+monthly_returns_from_daily <- daily_data_numeric %>%
+  mutate(month = floor_date(date, "month")) %>%
+  group_by(month) %>%
+  summarise(across(all_of(target_cols), ~ prod(1 + .) - 1)) %>% # Geometric sum
+  # Shift returns BACK by 1 month to align with the signal from the PREVIOUS month
+  mutate(join_date = month %m-% months(1)) 
+
+# --- 5. Merge Signals and Returns (Corrected) ---
+
+# A. Prepare Signals (Already has _sig_raw suffix from Step 2)
+# We select only the date and the signal columns
+signals_for_merge <- rebal_dates_df %>%
+  mutate(join_date = floor_date(date, "month")) %>%
+  select(join_date, ends_with("_sig_raw"))
+
+# B. Prepare Returns (Rename them to have _ret suffix)
+# monthly_returns_from_daily has columns like "Size_SMB", etc.
+# We rename them to "Size_SMB_ret" for clarity.
+returns_for_merge <- monthly_returns_from_daily %>%
+  rename_with(~paste0(., "_ret"), all_of(target_cols)) %>%
+  select(join_date, ends_with("_ret"))
+
+# C. Merge
+strategy_df <- inner_join(signals_for_merge, returns_for_merge, by = "join_date") %>%
+  # The 'date' in signals_for_merge (rebal_dates_df) is the rebalancing date (end of month T)
+  # We want to keep that as our main date index.
+  mutate(date = rebal_dates_df$date[match(join_date, rebal_dates_df$join_date_temp)]) 
+# (Wait, simpler way to keep date:)
+
+# Let's redo the merge slightly cleaner to preserve the exact trading date
+strategy_df <- rebal_dates_df %>%
+  mutate(join_date = floor_date(date, "month")) %>%
+  inner_join(
+    monthly_returns_from_daily %>%
+      rename_with(~paste0(., "_ret"), all_of(target_cols)), 
+    by = "join_date"
+  )
+
+# D. Define Column Lists for Loop
+# Signals end in "_sig_raw"
+sig_cols <- names(strategy_df)[grep("_sig_raw$", names(strategy_df))]
+# Returns end in "_ret"
+ret_cols <- names(strategy_df)[grep("_ret$", names(strategy_df))]
+
+print(paste("Found", length(sig_cols), "signal columns and", length(ret_cols), "return columns."))
+
+# --- 6. Calculate Strategy Returns (Robust Loop) ---
+factor_mom_daily_lag <- strategy_df %>%
+  rowwise() %>%
+  mutate(
+    # Extract vectors for this row (ensure numeric)
+    # We use c_across on the specific column lists we just defined
+    sigs = list(as.numeric(c_across(all_of(sig_cols)))),
+    rets = list(as.numeric(c_across(all_of(ret_cols)))),
+    
+    # Median Split Logic
+    median_sig = median(sigs, na.rm = TRUE),
+    
+    # Identify positions
+    # Long if Signal > Median
+    idx_long  = list(which(sigs > median_sig)),
+    # Short if Signal <= Median
+    idx_short = list(which(sigs <= median_sig)),
+    
+    # Calculate returns (handle empty buckets)
+    ret_long  = if(length(idx_long) > 0) mean(rets[idx_long], na.rm=TRUE) else 0,
+    ret_short = if(length(idx_short) > 0) mean(rets[idx_short], na.rm=TRUE) else 0,
+    
+    # Long-Short Return
+    mom_return = ret_long - ret_short
+  ) %>%
+  ungroup() %>%
+  select(date, ret_long, ret_short, mom_return) %>%
+  na.omit()
+
+# Print check
+print(head(factor_mom_daily_lag))
+
+# --- 7. Analysis: Pre/Post 2000 ---
+factor_mom_daily_lag <- factor_mom_daily_lag %>%
+  mutate(Period = ifelse(year(date) < 2000, "Pre-2000", "Post-2000"))
+
+stats <- factor_mom_daily_lag %>%
+  group_by(Period) %>%
+  summarise(
+    Ann_Return = mean(mom_return) * 12,
+    Ann_Vol    = sd(mom_return) * sqrt(12),
+    Sharpe     = (mean(mom_return) * 12) / (sd(mom_return) * sqrt(12))
+  )
+
+print("--- Performance by Era (Daily Data, 1-Day Lag) ---")
+print(stats)
+
+# --- 8. Plotting ---
+plot_data <- factor_mom_daily_lag %>%
+  arrange(date) %>%
+  mutate(cum_ret = cumprod(1 + mom_return))
+
+ggplot(plot_data, aes(x = date, y = cum_ret)) +
+  geom_line(color = "blue") +
+  scale_y_log10() +
+  labs(title = "Factor Momentum (Daily Data, 1-Day Lag)", 
+       subtitle = "Monthly Rebalancing", y = "Cumulative Return ($)") +
+  theme_minimal()
+
+# Now you can re-run the Efficient Frontier code block using 'factor_mom_daily_lag'
+
+# --- 8. Efficient Frontier Visualization (Full Code) ---
+
+# 1. Load Monthly Fama-French 3 Factors
+# We use this to get the "Market" (Stocks) and "Risk Free" (Bonds/Cash Proxy)
+ff_monthly_raw <- download_french_data("Fama/French 3 Factors")
+
+ff_monthly <- ff_monthly_raw$subsets$data[[1]] %>%
+  mutate(
+    # Convert YYYYMM to Date (Floor to 1st of month for easy merging)
+    date = floor_date(ymd(paste0(date, "01")), "month"),
+    
+    # Convert percentages to decimals
+    across(c(`Mkt-RF`, RF), ~ as.numeric(.) / 100),
+    
+    # Construct "Stocks" (Total Market Return = Excess + RF)
+    Stocks = `Mkt-RF` + RF,
+    
+    # Construct "Bonds" (Using Risk-Free rate as a proxy for safe asset/cash)
+    Bonds = RF 
+  ) %>%
+  select(date, Stocks, Bonds)
+
+# 2. Merge with your Strategy Data
+# factor_mom_daily_lag comes from the previous "Daily Data" block
+frontier_data <- factor_mom_daily_lag %>%
+  mutate(date = floor_date(date, "month")) %>% # Align dates
+  inner_join(ff_monthly, by = "date") %>%
+  select(Factor_Mom = mom_return, Stocks, Bonds) %>% 
+  na.omit() # Critical: Remove any rows with missing data to prevent errors
+
+# 3. Calculate Statistics for Optimization
+# Annualized Mean Returns vector
+mu <- colMeans(frontier_data) * 12
+
+# Annualized Covariance Matrix
+sigma <- cov(frontier_data) * 12
+
+# 4. Run Monte Carlo Simulation (5,000 Random Portfolios)
+n_sim <- 5000
+sim_results <- matrix(NA, nrow = n_sim, ncol = 5)
+colnames(sim_results) <- c("Return", "Risk", "W_Mom", "W_Stock", "W_Bond")
+
+set.seed(123) # For reproducible results
+for(i in 1:n_sim) {
+  # Generate 3 random weights
+  w <- runif(3)
+  
+  # Normalize so they sum to 1.0 (Long-Only constraint)
+  w <- w / sum(w) 
+  
+  # Calculate Expected Portfolio Return
+  port_ret <- sum(w * mu)
+  
+  # Calculate Expected Portfolio Volatility (Risk)
+  port_risk <- sqrt(t(w) %*% sigma %*% w)
+  
+  # Store results: Return, Risk, and weights
+  sim_results[i,] <- c(port_ret, port_risk, w)
+}
+
+# Convert to data frame for plotting
+sim_df <- as.data.frame(sim_results)
+
+# 5. Plot the Efficient Frontier
+print(
+  ggplot(sim_df, aes(x = Risk, y = Return, color = W_Mom)) +
+    geom_point(alpha = 0.6, size = 1.5) +
+    
+    # Color scale: Grey = Low Factor Mom, Blue = High Factor Mom
+    scale_color_gradient(low = "red", high = "blue", name = "Weight in\nFactor Mom") +
+    
+    labs(
+      title = "Efficient Frontier Analysis: Adding Factor Momentum",
+      subtitle = "Blue points indicate high allocation to Factor Momentum strategy.",
+      x = "Annualized Risk (Volatility)", 
+      y = "Annualized Return"
+    ) +
+    
+    # Format axes as percentages
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      legend.position = "right"
+    )
+)
+
+
+
+# --- 9. Comparison Plot: Factor Momentum (Daily Lag) vs. Industry Momentum ---
+
+# 1. Prepare Factor Momentum Data
+factor_mom_ready <- factor_mom_daily_lag %>%
+  select(date, momentum_return = mom_return) %>%
+  mutate(strategy_type = "Factor Momentum (Daily 1-Day Lag)")
+
+# 2. Prepare Industry Momentum Data
+# (Assuming 'industry_momentum' exists from previous steps. 
+#  If not, re-run Step 7 from the Monthly Replication block)
+if (exists("industry_momentum")) {
+  
+  # 3. Find Common Start Date
+  common_start <- max(min(factor_mom_ready$date), min(industry_momentum$date))
+  
+  # 4. Combine and Calculate Cumulative Returns
+  comparison_data <- bind_rows(factor_mom_ready, industry_momentum) %>%
+    filter(date >= common_start) %>%
+    arrange(strategy_type, date) %>%
+    group_by(strategy_type) %>%
+    mutate(Cumulative_Return = cumprod(1 + momentum_return)) %>%
+    ungroup()
+  
+  # 5. Plot
+  print(
+    ggplot(comparison_data, aes(x = date, y = Cumulative_Return, color = strategy_type)) +
+      geom_line(linewidth = 1) +
+      
+      # Log scale for long-term performance comparison
+      scale_y_log10(
+        breaks = scales::log_breaks(n = 10),
+        labels = scales::label_number(accuracy = 0.1)
+      ) +
+      
+      # Colors: Black for Industry (Benchmark), Blue for Factor (Strategy)
+      scale_color_manual(values = c("Industry Momentum" = "black", 
+                                    "Factor Momentum (Daily 1-Day Lag)" = "blue")) +
+      
+      labs(
+        title = "Cumulative Performance: Factor Momentum vs. Industry Momentum",
+        subtitle = "Factor Mom: Daily Signal with 1-Day Implementation Lag vs. Standard Industry Mom",
+        x = "Year", 
+        y = "Cumulative Performance ($)", 
+        color = "Strategy"
+      ) +
+      
+      theme_minimal(base_size = 12) +
+      theme(
+        legend.position = "top",
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)
+      )
+  )
+  
+} else {
+  print("Error: 'industry_momentum' object not found. Please run the Industry Momentum calculation step first.")
+}
