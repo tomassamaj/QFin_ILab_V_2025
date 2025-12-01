@@ -464,6 +464,74 @@ ff3_factors_monthly <- ff3_factors_monthly_raw$subsets$data[[1]] |>
   mutate(date = ceiling_date(date, "month") - days(1)) |>
   rename(Mkt_RF = "Mkt-RF") # Rename for easier formula use
 
+# --- 11. Compare Factor Momentum vs. Benchmarks (Equity & Bonds) ---
+
+# A. Prepare Benchmark Data using existing 'ff3_factors_monthly'
+benchmarks <- ff3_factors_monthly %>%
+  mutate(
+    # Equity = Market Excess Return + Risk Free Rate
+    Equity = Mkt_RF + RF,
+    # Risk_Free = RF (proxy for T-Bills/Safe Asset)
+    Risk_Free = RF
+  ) %>%
+  select(date, Equity, Risk_Free)
+
+# B. Merge, Calculate Cumulative Returns, and Plot
+if (!is.null(factor_momentum_raw)) {
+  
+  # 1. Merge Factor Momentum with Benchmarks
+  comparison_data <- factor_momentum_raw %>%
+    select(date, Factor_Momentum = momentum_return) %>% 
+    inner_join(benchmarks, by = "date") %>%
+    pivot_longer(
+      cols = c("Factor_Momentum", "Equity", "Risk_Free"),
+      names_to = "Asset",
+      values_to = "Return"
+    ) %>%
+    arrange(Asset, date) %>%
+    group_by(Asset) %>%
+    mutate(Cumulative_Wealth = cumprod(1 + Return)) %>%
+    ungroup()
+  
+  # 2. Define colors mapping
+  colors_map <- c(
+    "Factor_Momentum" = "blue", 
+    "Equity" = "black", 
+    "Risk_Free" = "forestgreen"
+  )
+  
+  # 3. Plot
+  print(
+    ggplot(comparison_data, aes(x = date, y = Cumulative_Wealth, color = Asset)) +
+      geom_line(linewidth = 1) +
+      scale_y_log10(
+        breaks = scales::log_breaks(n = 10),
+        labels = scales::label_dollar()
+      ) +
+      scale_color_manual(
+        values = colors_map,
+        # CRITICAL FIX: explicitly map the data names (breaks) to the display names (labels)
+        breaks = c("Equity", "Factor_Momentum", "Risk_Free"),
+        labels = c("Equity (S&P 500 Proxy)", "Factor Momentum", "Risk-Free (Bonds)")
+      ) +
+      labs(
+        title = "Factor Momentum vs. Equity & Bonds",
+        subtitle = "Cumulative Growth of $1 Invested (Log Scale)",
+        x = "Year",
+        y = "Portfolio Value ($)",
+        color = "Asset Class"
+      ) +
+      theme_minimal(base_size = 12) +
+      theme(
+        legend.position = "top",
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5)
+      )
+  )
+  
+} else {
+  print("Factor Momentum Raw dataframe missing. Please ensure Step 7 ran correctly.")
+}
 # --- 2. Select One JKP Factor to Regress ---
 jkp_factor_name <- "Book_to_Market_HML" # Make sure this matches a column name
 
