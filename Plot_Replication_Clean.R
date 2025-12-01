@@ -2025,6 +2025,313 @@ print(cluster_ls_plot)
 
 
 
+# Even Split clusters -----------------------------------------------------
+
+# -------------------------00--
+# 10. FACTOR CLUSTER ANALYSIS (EVEN CLUSTERS + 1/3 LONG, 1/3 SHORT)
+# -------------------------00--
+print("--- 10. Running Factor Cluster Analysis (Even Clusters + 1/3 Long, 1/3 Short) ---")
+
+# --- 10.1. Correlation & Clustering into 6 Even Clusters ---
+
+# Create correlation matrix
+factor_data_for_corr <- final_merged_renamed %>%
+  select(any_of(renamed_factor_cols)) %>%
+  na.omit()
+
+cor_matrix <- cor(factor_data_for_corr)
+
+# Perform clustering
+# Using 1 - abs(correlation) as distance so highly negatively correlated factors cluster together
+dist_matrix <- as.dist(1 - abs(cor_matrix)) 
+hclust_results <- hclust(dist_matrix, method = "ward.D2")
+
+# We want 6 clusters with as equal sizes as possible
+K_CLUSTERS <- 6
+
+# 1. Get factor names in dendrogram leaf order
+factor_names_ordered <- colnames(cor_matrix)[hclust_results$order]
+
+# 2. Work out equal-ish chunk sizes
+n_factors <- length(factor_names_ordered)
+base_size <- floor(n_factors / K_CLUSTERS)          # minimum size per cluster
+remainder <- n_factors - base_size * K_CLUSTERS     # first 'remainder' clusters get +1
+
+cluster_sizes <- rep(base_size, K_CLUSTERS)
+if (remainder > 0) {
+  cluster_sizes[1:remainder] <- cluster_sizes[1:remainder] + 1
+}
+
+# 3. Split the ordered factor list into consecutive chunks of those sizes
+start_idx <- cumsum(c(1, head(cluster_sizes, -1)))
+end_idx   <- cumsum(cluster_sizes)
+
+cluster_list <- map2(start_idx, end_idx, ~ factor_names_ordered[.x:.y])
+names(cluster_list) <- paste0("Cluster_", seq_len(K_CLUSTERS))
+
+print("Even-sized Factor Clusters (based on dendrogram order):")
+print(map_int(cluster_list, length))
+print(cluster_list)
+
+
+# --- 10.2. Calculate Momentum for Each Cluster (1/3 Long, 1/3 Short) ---
+
+# Fixed parameters for signal/holding
+lookback_months <- 1
+holding_months  <- 1
+signal_lag      <- 1
+
+cluster_momentum_performance <- map_dfr(cluster_list, function(cluster_factors) {
+  
+  # Keep only factors that exist in the merged data
+  target_cols_exist <- intersect(cluster_factors, colnames(final_merged_renamed))
+  if (length(target_cols_exist) < 2) return(NULL)  # need at least 2 to form long & short
+  
+  # 1. Signal Generation (log returns over lookback, then lag)
+  signals <- final_merged_renamed %>%
+    select(date, all_of(target_cols_exist)) %>%
+    arrange(date) %>%
+    mutate(across(
+      all_of(target_cols_exist),
+      ~ rollapply(log(1 + .), width = lookback_months, FUN = sum,
+                  fill = NA, align = "right"),
+      .names = "{.col}_sig"
+    )) %>%
+    mutate(across(ends_with("_sig"), ~ lag(., n = signal_lag)))
+  
+  # 2. Forward Returns (log returns over holding window)
+  returns <- final_merged_renamed %>%
+    select(date, all_of(target_cols_exist)) %>%
+    arrange(date) %>%
+    mutate(across(
+      all_of(target_cols_exist),
+      ~ rollapply(log(1 + .), width = holding_months, FUN = sum,
+                  fill = NA, align = "left"),
+      .names = "{.col}_ret"
+    )) %>%
+    select(date, ends_with("_ret"))
+  
+  # 3. Merge & drop rows with any NA
+  full_dat <- inner_join(signals, returns, by = "date") %>% 
+    na.omit()
+  
+  # 4. Rowwise portfolio: 1/3 long, 1/3 short, middle neutral
+  strat_ret <- full_dat %>%
+    rowwise() %>%
+    mutate(
+      res = list({
+        sigs <- c_across(ends_with("_sig"))
+        rets <- c_across(ends_with("_ret"))
+        
+        # Drop positions with NA, just in case
+        non_na <- which(!is.na(sigs) & !is.na(rets))
+        if (length(non_na) < 2) {
+          tibble(
+            long_return       = 0,
+            short_return      = 0,
+            long_short_return = 0
+          )
+        } else {
+          sigs <- sigs[non_na]
+          rets <- rets[non_na]
+          
+          # Order signals ascending; bottom = short, top = long
+          ord <- order(sigs)    # 1 = lowest signal
+          n   <- length(ord)
+          
+          if (n < 3) {
+            # Fallback: with <3 names, just use one long / one short
+            idx_s <- ord[1]
+            idx_l <- ord[n]
+          } else {
+            # 1/3 long, 1/3 short, middle 1/3 neutral
+            k <- floor(n / 3)   # number in each tail
+            idx_s <- ord[1:k]               # bottom k = short
+            idx_l <- ord[(n - k + 1):n]     # top k = long
+            # middle ord[(k+1):(n-k)] is unused (neutral)
+          }
+          
+          # Convert log returns to simple returns
+          simple_rets <- exp(rets) - 1
+          
+          ret_l <- mean(simple_rets[idx_l])
+          ret_s <- mean(simple_rets[idx_s])
+          
+          tibble(
+            long_return       = ret_l,
+            short_return      = ret_s,
+            long_short_return = ret_l - ret_s
+          )
+        }
+      })
+    ) %>%
+    ungroup() %>%
+    select(date, res) %>%
+    unnest(res)
+  
+  return(strat_ret)
+}, .id = "Cluster")
+
+
+# --- 10.3. Plot A: Momentum Performance by Factor Cluster ---
+print("--- Plotting 10a: Momentum Performance by Cluster ---")
+
+# Prepare Data
+cluster_plot_data <- cluster_momentum_performance %>%
+  select(Cluster, date, Return = long_short_return) %>%
+  na.omit()
+
+# Find Common Start Date (Preserving Date Class)
+start_dates_a <- cluster_plot_data %>%
+  group_by(Cluster) %>%
+  summarise(first_date = min(date), .groups = "drop")
+
+common_start_date_a <- max(start_dates_a$first_date)
+
+# Filter & Cumulate
+cluster_plot_data <- cluster_plot_data %>%
+  filter(date >= common_start_date_a) %>%
+  group_by(Cluster) %>%
+  arrange(date) %>%
+  mutate(Cumulative_Return = cumprod(1 + Return)) %>%
+  ungroup()
+
+# Add Start Date (t=0) at 1.0
+start_rows_a <- tibble(
+  Cluster = unique(cluster_plot_data$Cluster)
+) %>%
+  mutate(
+    date = common_start_date_a %m-% months(1),
+    Return = 0,
+    Cumulative_Return = 1.0
+  )
+
+cluster_plot_final_a <- bind_rows(start_rows_a, cluster_plot_data) %>%
+  arrange(Cluster, date)
+
+# Plot
+cluster_plot <- ggplot(cluster_plot_final_a, aes(x = date, y = Cumulative_Return, color = Cluster)) +
+  geom_line(linewidth = 0.8) +
+  scale_y_log10(labels = scales::comma, breaks = scales::log_breaks(n = 10)) +
+  labs(title = "Momentum Performance by Factor Cluster",
+       subtitle = "1M/1M Strategy, 1/3 Long–1/3 Short per Cluster. Normalized start at 1.0.",
+       x = "Year", y = "Cumulative Return (Log Scale, Start=1)") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+print(cluster_plot)
+
+
+# --- 10.4. Plot B: Long vs. Short vs. Net Performance (Faceted) ---
+print("--- Plotting 10b: Long/Short Legs by Cluster ---")
+
+# Prepare Data for Faceted Plot
+cluster_ls_data <- cluster_momentum_performance %>%
+  select(Cluster, date, long_return, short_return, long_short_return) %>%
+  # Invert short return to show PnL contribution
+  mutate(short_return_inv = -short_return) %>%
+  pivot_longer(
+    cols = c("long_return", "short_return_inv", "long_short_return"), 
+    names_to = "Strategy", 
+    values_to = "Return"
+  ) %>%
+  na.omit() 
+
+# Find Common Start Date
+start_dates_b <- cluster_ls_data %>%
+  group_by(Cluster) %>%
+  summarise(first_date = min(date), .groups = "drop")
+
+common_start_date_b <- max(start_dates_b$first_date)
+
+# Filter & Cumulate
+cluster_ls_data <- cluster_ls_data %>%
+  filter(date >= common_start_date_b) %>%
+  group_by(Cluster, Strategy) %>%
+  arrange(date) %>%
+  mutate(Cumulative_Return = cumprod(1 + Return)) %>%
+  ungroup()
+
+# Add Start Date (t=0) at 1.0 for all Cluster × Strategy combos
+start_rows_b <- expand_grid(
+  Cluster  = unique(cluster_ls_data$Cluster),
+  Strategy = unique(cluster_ls_data$Strategy)
+) %>%
+  mutate(
+    date = common_start_date_b %m-% months(1),
+    Return = 0,
+    Cumulative_Return = 1.0
+  )
+
+cluster_ls_final_b <- bind_rows(start_rows_b, cluster_ls_data) %>%
+  arrange(Cluster, Strategy, date)
+
+# Plot Faceted
+cluster_ls_plot <- ggplot(cluster_ls_final_b, aes(x = date, y = Cumulative_Return, color = Strategy)) +
+  geom_line(linewidth = 0.8) +
+  facet_wrap(~ Cluster, scales = "free_y", ncol = 2) + 
+  scale_y_log10(labels = scales::comma) +
+  scale_color_manual(
+    values = c(
+      "long_return"       = "darkgreen", 
+      "short_return_inv"  = "darkred", 
+      "long_short_return" = "blue"
+    ),
+    breaks = c("long_return", "short_return_inv", "long_short_return"),
+    labels = c("Long-Only", "Short-Only (Inv)", "Long-Short")
+  ) +
+  labs(title = "Factor Momentum: Long vs. Short Leg Performance by Cluster",
+       subtitle = "1M/1M Strategy, 1/3 Long 1/3 Short Split. Normalized start at 1",
+       x = "Year", y = "Cumulative Return (Log Scale)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(cluster_ls_plot)
+
+
+
+
+cluster_stats <- cluster_momentum_performance %>%
+  group_by(Cluster) %>%
+  summarise(
+    n_obs = n(),
+    
+    # monthly means
+    mean_ls  = mean(long_short_return, na.rm = TRUE),
+    sd_ls    = sd(long_short_return, na.rm = TRUE),
+    
+    mean_long = mean(long_return, na.rm = TRUE),
+    sd_long   = sd(long_return, na.rm = TRUE),
+    
+    mean_short = mean(short_return, na.rm = TRUE),
+    sd_short   = sd(short_return, na.rm = TRUE),
+    
+    # annualised (assuming monthly data → *12)
+    ann_ret_ls   = (1 + mean_ls) ^ 12 - 1,
+    ann_vol_ls   = sd_ls * sqrt(12),
+    ann_sharpe_ls = ann_ret_ls / ann_vol_ls,
+    
+    ann_ret_long   = (1 + mean_long) ^ 12 - 1,
+    ann_vol_long   = sd_long * sqrt(12),
+    ann_sharpe_long = ann_ret_long / ann_vol_long,
+    
+    ann_ret_short   = (1 + mean_short) ^ 12 - 1,
+    ann_vol_short   = sd_short * sqrt(12),
+    ann_sharpe_short = ann_ret_short / ann_vol_short,
+    
+    .groups = "drop"
+  ) %>%
+  arrange(desc(ann_sharpe_ls))  # sort by LS Sharpe (optional)
+
+cluster_stats
+
+
+
+
+
+
+
+
 
 
 
