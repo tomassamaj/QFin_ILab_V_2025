@@ -16,6 +16,9 @@ library(broom) # For tidying model output
 # Make sure these are loaded from your previous script
 library(zoo) # For rollapply
 library(purrr)     # For loops/mapping
+library(quantmod)  # For financial data handling
+library(gt) # For tables
+
 
 # --- 1. Load and Prepare Factor/Theme Data ---
 
@@ -466,131 +469,140 @@ ff3_factors_monthly <- ff3_factors_monthly_raw$subsets$data[[1]] |>
 
 # --- 11. Compare Factor Momentum vs. Benchmarks (Equity & Bonds) ---
 
-# A. Prepare Benchmark Data using existing 'ff3_factors_monthly'
-benchmarks <- ff3_factors_monthly %>%
-  mutate(
-    # Equity = Market Excess Return + Risk Free Rate
-    Equity = Mkt_RF + RF,
-    # Risk_Free = RF (proxy for T-Bills/Safe Asset)
-    Risk_Free = RF
+# --- 1. Download Benchmark Data (Quantmod) ---
+
+# Define start date (slightly earlier to ensure monthly calculation works for start of analysis)
+q_start <- "1960-01-01" 
+
+# A. Download S&P 500 (^GSPC)
+getSymbols("^GSPC", src = "yahoo", from = q_start, to = Sys.Date(), auto.assign = TRUE)
+sp500_monthly <- monthlyReturn(Ad(GSPC), type = "log") # Log returns for consistency
+# Convert index to Date and align to End-of-Month
+sp500_df <- data.frame(date = index(sp500_monthly), sp500_ret = as.numeric(sp500_monthly)) %>%
+  mutate(date = ceiling_date(date, "month") - days(1))
+
+# B. Download US Treasuries (IEF)
+# Note: IEF inception is around 2002. Data before that will be NA.
+getSymbols("IEF", src = "yahoo", from = "2000-01-01", to = Sys.Date(), auto.assign = TRUE)
+ief_monthly <- monthlyReturn(Ad(IEF), type = "log")
+ief_df <- data.frame(date = index(ief_monthly), bond_ret = as.numeric(ief_monthly)) %>%
+  mutate(date = ceiling_date(date, "month") - days(1))
+
+# --- 2. Merge and Align Data ---
+
+# Prepare Strategy Data (Rename for plot labels)
+strat_df <- factor_momentum_raw %>%
+  select(date, `Factor Momentum` = momentum_return) %>%
+  left_join(industry_momentum_raw %>% select(date, `Industry Momentum` = momentum_return), by = "date")
+
+# Join with Quantmod Data
+combined_data <- strat_df %>%
+  left_join(sp500_df, by = "date") %>%
+  left_join(ief_df, by = "date") %>%
+  rename(`S&P 500` = sp500_ret, `US Treasuries (IEF)` = bond_ret) %>%
+  pivot_longer(cols = -date, names_to = "Strategy", values_to = "Return") %>%
+  # Remove rows where return is NA (Crucial for IEF to start at 1.0 in 2002)
+  filter(!is.na(Return))
+
+# --- 3. Calculate Cumulative Wealth ---
+
+plot_data <- combined_data %>%
+  arrange(Strategy, date) %>%
+  group_by(Strategy) %>%
+  mutate(Cumulative_Wealth = cumprod(1 + Return)) %>%
+  ungroup()
+
+# --- 4. Generate Plot ---
+
+# Define colors matching the screenshot
+custom_colors <- c(
+  "Factor Momentum" = "#003f5c",     # Dark Blue
+  "Industry Momentum" = "#4481c2",   # Lighter Blue
+  "S&P 500" = "#d62728",             # Red
+  "US Treasuries (IEF)" = "#ff7f0e"  # Orange
+)
+
+p <- ggplot(plot_data, aes(x = date, y = Cumulative_Wealth, color = Strategy)) +
+  geom_line(linewidth = 1) +
+  scale_y_log10(
+    breaks = c(1, 3, 10, 30, 100),
+    labels = scales::number_format(accuracy = 0.01)
+  ) +
+  scale_color_manual(values = custom_colors) +
+  labs(
+    title = "Momentum (J=1, K=1) vs Benchmarks",
+    subtitle = "Cumulative Wealth (Log Scale) | Rebased to 1.0",
+    y = "Cumulative Wealth ($)",
+    x = NULL,
+    color = NULL,
+    caption = "Benchmarks: S&P 500 (^GSPC) and US Treasuries (IEF) fetched via Quantmod"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(color = "gray30"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90"),
+    panel.grid.major.y = element_line(color = "gray90")
+  )
+
+print(p)
+
+# --- 5. Generate Performance Table (gt) ---
+
+# Get Risk Free rate from FF data for Sharpe Ratio calculation
+# If ff3_factors_monthly is not in env, assume 0 for safety, but try to use it.
+if(exists("ff3_factors_monthly")) {
+  rf_data <- ff3_factors_monthly %>% select(date, RF)
+} else {
+  rf_data <- data.frame(date = unique(combined_data$date), RF = 0)
+}
+
+perf_stats <- combined_data %>%
+  left_join(rf_data, by = "date") %>%
+  group_by(Strategy) %>%
+  summarise(
+    Total_Return = prod(1 + Return) - 1,
+    N_Months = n(),
+    # Geometric Annualized Return
+    Ann_Return = (1 + Total_Return)^(12 / N_Months) - 1,
+    # Annualized Volatility
+    Ann_Vol = sd(Return) * sqrt(12),
+    # Sharpe Ratio (Mean Excess Return / Std Dev)
+    Sharpe = (mean(Return - coalesce(RF, 0)) * 12) / Ann_Vol
   ) %>%
-  select(date, Equity, Risk_Free)
+  select(Strategy, Total_Return, Ann_Return, Ann_Vol, Sharpe) %>%
+  arrange(desc(Total_Return))
 
-# B. Merge, Calculate Cumulative Returns, and Plot
-if (!is.null(factor_momentum_raw)) {
-  
-  # 1. Merge Factor Momentum with Benchmarks
-  comparison_data <- factor_momentum_raw %>%
-    select(date, Factor_Momentum = momentum_return) %>% 
-    inner_join(benchmarks, by = "date") %>%
-    pivot_longer(
-      cols = c("Factor_Momentum", "Equity", "Risk_Free"),
-      names_to = "Asset",
-      values_to = "Return"
-    ) %>%
-    arrange(Asset, date) %>%
-    group_by(Asset) %>%
-    mutate(Cumulative_Wealth = cumprod(1 + Return)) %>%
-    ungroup()
-  
-  # 2. Define colors mapping
-  colors_map <- c(
-    "Factor_Momentum" = "blue", 
-    "Equity" = "black", 
-    "Risk_Free" = "forestgreen"
+# Create Table
+gt_table <- perf_stats %>%
+  gt() %>%
+  tab_header(
+    title = md("**Performance Summary**")
+  ) %>%
+  fmt_percent(
+    columns = c(Total_Return, Ann_Return, Ann_Vol),
+    decimals = 1
+  ) %>%
+  fmt_number(
+    columns = c(Sharpe),
+    decimals = 2
+  ) %>%
+  cols_label(
+    Total_Return = "Total Return",
+    Ann_Return = "Ann. Return",
+    Ann_Vol = "Ann. Vol",
+    Sharpe = "Sharpe"
+  ) %>%
+  tab_options(
+    table.border.top.color = "white",
+    heading.align = "left",
+    table.font.size = 14,
+    data_row.padding = px(6)
   )
-  
-  # 3. Plot
-  print(
-    ggplot(comparison_data, aes(x = date, y = Cumulative_Wealth, color = Asset)) +
-      geom_line(linewidth = 1) +
-      scale_y_log10(
-        breaks = scales::log_breaks(n = 10),
-        labels = scales::label_dollar()
-      ) +
-      scale_color_manual(
-        values = colors_map,
-        # CRITICAL FIX: explicitly map the data names (breaks) to the display names (labels)
-        breaks = c("Equity", "Factor_Momentum", "Risk_Free"),
-        labels = c("Equity (S&P 500 Proxy)", "Factor Momentum", "Risk-Free (Bonds)")
-      ) +
-      labs(
-        title = "Factor Momentum vs. Equity & Bonds",
-        subtitle = "Cumulative Growth of $1 Invested (Log Scale)",
-        x = "Year",
-        y = "Portfolio Value ($)",
-        color = "Asset Class"
-      ) +
-      theme_minimal(base_size = 12) +
-      theme(
-        legend.position = "top",
-        plot.title = element_text(hjust = 0.5, face = "bold"),
-        plot.subtitle = element_text(hjust = 0.5)
-      )
-  )
-  
-} else {
-  print("Factor Momentum Raw dataframe missing. Please ensure Step 7 ran correctly.")
-}
 
-## do the same plot but using the scaled strategy 
-if (!is.null(factor_momentum_scaled)) {
-  
-  # 1. Merge Factor Momentum with Benchmarks
-  comparison_data_scaled <- factor_momentum_scaled %>%
-    select(date, Factor_Momentum = scaled_momentum_return) %>% 
-    inner_join(benchmarks, by = "date") %>%
-    pivot_longer(
-      cols = c("Factor_Momentum", "Equity", "Risk_Free"),
-      names_to = "Asset",
-      values_to = "Return"
-    ) %>%
-    arrange(Asset, date) %>%
-    group_by(Asset) %>%
-    mutate(Cumulative_Wealth = cumprod(1 + Return)) %>%
-    ungroup()
-  
-  # 2. Define colors mapping
-  colors_map <- c(
-    "Factor_Momentum" = "blue", 
-    "Equity" = "black", 
-    "Risk_Free" = "forestgreen"
-  )
-  
-  # 3. Plot
-  print(
-    ggplot(comparison_data_scaled, aes(x = date, y = Cumulative_Wealth, color = Asset)) +
-      geom_line(linewidth = 1) +
-      scale_y_log10(
-        breaks = scales::log_breaks(n = 10),
-        labels = scales::label_dollar()
-      ) +
-      scale_color_manual(
-        values = colors_map,
-        # CRITICAL FIX: explicitly map the data names (breaks) to the display names (labels)
-        breaks = c("Equity", "Factor_Momentum", "Risk_Free"),
-        labels = c("Equity (S&P 500 Proxy)", "Factor Momentum (Scaled)", "Risk-Free (Bonds)")
-      ) +
-      labs(
-        title = "Scaled Factor Momentum vs. Equity & Bonds",
-        subtitle = paste0("Cumulative Growth of $1 Invested (Log Scale, Scaled to ", scales::percent(target_vol, accuracy = 1), " Ann. Volatility)"),
-        x = "Year",
-        y = "Portfolio Value ($)",
-        color = "Asset Class"
-      ) +
-      theme_minimal(base_size = 12) +
-      theme(
-        legend.position = "top",
-        plot.title = element_text(hjust = 0.5, face = "bold"),
-        plot.subtitle = element_text(hjust = 0.5)
-      )
-  )
-  
-} else {
-  print
-("Factor Momentum Scaled dataframe missing. Please ensure Step 9 ran correctly.")
-}
-
+print(gt_table)
 # --- 2. Select One JKP Factor to Regress ---
 jkp_factor_name <- "Book_to_Market_HML" # Make sure this matches a column name
 
