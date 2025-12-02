@@ -1522,10 +1522,6 @@ final_merged_renamed <- final_merged %>%
 industry_cols <- str_to_lower(industry_names)
 renamed_factor_cols <- intersect(names(factor_rename_map), colnames(final_merged_renamed))
 
-# --- 6. Save Data Environment ---
-save.image(file = "First_round_data.RData")
-print("Data environment saved to First_round_data.RData")
-
 
 # --- 7. NEW: Generalized Momentum Strategy Function ---
 
@@ -2962,3 +2958,180 @@ if (exists("industry_momentum")) {
 } else {
   print("Error: 'industry_momentum' object not found. Please run the Industry Momentum calculation step first.")
 }
+
+
+
+
+
+
+
+
+
+
+
+
+# --- Full Comparison: Factor Mom vs Industry Mom vs Market (Pre/Post 2000) ---
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(lubridate)
+library(frenchdata)
+library(quantmod)
+
+# 1. Prepare Data Sources
+# ---------------------------------------------------------
+
+# A. Factor Momentum (Monthly / Academic)
+# Assumes 'factor_momentum' dataframe exists from previous steps
+if(exists("factor_momentum")) {
+  df_factor <- factor_momentum %>%
+    select(date, ret = momentum_return) %>%
+    mutate(Strategy = "Factor Momentum")
+} else {
+  stop("Error: 'factor_momentum' object not found. Please run the strategy calculation first.")
+}
+
+# B. Industry Momentum (Monthly)
+# Assumes 'industry_momentum' dataframe exists
+if(exists("industry_momentum")) {
+  df_industry <- industry_momentum %>%
+    select(date, ret = momentum_return) %>%
+    mutate(Strategy = "Industry Momentum")
+} else {
+  # Fallback if missing: Create empty DF to avoid crash, but warn user
+  warning("Industry Momentum missing. Skipping.")
+  df_industry <- data.frame(date=as.Date(character()), ret=numeric(), Strategy=character())
+}
+
+# C. Market (Mkt-RF) from Fama-French
+# We download this fresh to ensure it's available
+ff_raw <- download_french_data("Fama/French 3 Factors")
+df_market <- ff_raw$subsets$data[[1]] %>%
+  mutate(
+    date = floor_date(ymd(paste0(date, "01")), "month"),
+    ret = as.numeric(`Mkt-RF`) / 100
+  ) %>%
+  select(date, ret) %>%
+  mutate(Strategy = "Market (Mkt-RF)")
+
+# 2. Combine and Define Eras
+# ---------------------------------------------------------
+# Align start dates to the latest start date of the three
+common_start <- max(min(df_factor$date), min(df_industry$date, na.rm=TRUE), min(df_market$date))
+
+all_data <- bind_rows(df_factor, df_industry, df_market) %>%
+  filter(date >= common_start) %>%
+  mutate(Period = ifelse(year(date) < 2000, "Pre-2000", "Post-2000")) %>%
+  arrange(Strategy, date)
+
+# 3. Re-Index Cumulative Returns per Period
+# ---------------------------------------------------------
+# Calculate cumulative return starting at 1.0 for EACH period
+plot_data <- all_data %>%
+  group_by(Strategy, Period) %>%
+  arrange(date) %>%
+  mutate(Cumulative_Index = cumprod(1 + ret)) %>%
+  ungroup()
+
+# 4. Calculate Global Y-Axis Limits (Same Scale for Both Plots)
+# ---------------------------------------------------------
+# We find the global min and max across BOTH periods to lock the axis
+global_min <- min(plot_data$Cumulative_Index) * 0.8
+global_max <- max(plot_data$Cumulative_Index) * 1.5 # Extra headroom for text box
+
+# 5. Function to Generate Plot with Metrics Box
+# ---------------------------------------------------------
+plot_with_metrics <- function(data, period_name, y_min, y_max) {
+  
+  # Filter Data
+  p_data <- data %>% filter(Period == period_name)
+  
+  # Calculate Metrics for the Box
+  stats <- p_data %>%
+    group_by(Strategy) %>%
+    summarise(
+      Tot = prod(1 + ret) - 1,
+      Ann = mean(ret) * 12,
+      Vol = sd(ret) * sqrt(12),
+      SR  = (mean(ret) * 12) / (sd(ret) * sqrt(12))
+    )
+  
+  # Construct Text String
+  # Dynamic formatting to handle missing strategies if any
+  stats_text <- paste0(
+    "PERIOD: ", period_name, "\n",
+    "--------------------------------", "\n"
+  )
+  
+  for(strat in unique(stats$Strategy)) {
+    s_row <- stats %>% filter(Strategy == strat)
+    stats_text <- paste0(
+      stats_text,
+      strat, ":\n",
+      "  Tot: ", percent(s_row$Tot, 0.1), " | Ann: ", percent(s_row$Ann, 0.1), "\n",
+      "  Vol: ", percent(s_row$Vol, 0.1), " | SR:  ", round(s_row$SR, 2), "\n\n"
+    )
+  }
+  
+  # Plot
+  ggplot(p_data, aes(x = date, y = Cumulative_Index, color = Strategy, linewidth = Strategy)) +
+    geom_line() +
+    
+    # Locked Y-Axis (Log Scale)
+    scale_y_log10(
+      limits = c(y_min, y_max),
+      breaks = scales::log_breaks(n = 10),
+      labels = scales::dollar_format(accuracy = 0.01)
+    ) +
+    
+    # Manual Styles
+    scale_color_manual(values = c(
+      "Factor Momentum" = "blue",
+      "Industry Momentum" = "black", 
+      "Market (Mkt-RF)" = "darkgreen"
+    )) +
+    scale_linewidth_manual(values = c(
+      "Factor Momentum" = 1.2,
+      "Industry Momentum" = 0.8,
+      "Market (Mkt-RF)" = 0.8
+    )) +
+    
+    # Metrics Box (Top-Left)
+    annotate("label", 
+             x = min(p_data$date), 
+             y = y_max, 
+             label = stats_text, 
+             hjust = 0, # Left-align text
+             vjust = 1, # Top-align box
+             size = 4, 
+             family = "mono", # Monospace for alignment
+             fill = "white", 
+             alpha = 0.85,
+             label.size = 0.2) +
+    
+    # Labels
+    labs(
+      title = paste0("Strategy Comparison: ", period_name),
+      subtitle = "Monthly Data | Log Scale | Re-indexed to $1.00",
+      x = "Year", 
+      y = "Value of $1 Invested"
+    ) +
+    
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold"),
+      legend.title = element_blank()
+    )
+}
+
+# 6. Run and Print
+# ---------------------------------------------------------
+print(plot_with_metrics(plot_data, "Pre-2000", global_min, global_max))
+print(plot_with_metrics(plot_data, "Post-2000", global_min, global_max))
+
+
+
+
+
+
