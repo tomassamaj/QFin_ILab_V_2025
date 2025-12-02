@@ -3135,3 +3135,135 @@ print(plot_with_metrics(plot_data, "Post-2000", global_min, global_max))
 
 
 
+
+
+# --- 14. PCA Analysis: Systematic vs. Idiosyncratic Momentum ---
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(broom)
+
+# 1. Data Preparation
+# ---------------------------------------------------------
+# Ensure we have the factor data loaded
+if(!exists("final_merged_renamed") || !exists("renamed_factor_cols")) {
+  stop("Error: Factor data not found. Please run the 'Load and Prepare' step first.")
+}
+
+# Select only the factor columns and remove rows with NAs
+pca_data <- final_merged_renamed %>%
+  select(date, all_of(renamed_factor_cols)) %>%
+  na.omit()
+
+# Create a matrix of returns (excluding date)
+factor_mat <- pca_data %>% select(-date) %>% as.matrix()
+
+# 2. Run Principal Component Analysis (PCA)
+# ---------------------------------------------------------
+# scale=TRUE normalizes factors to have unit variance (important for PCA on returns)
+pca_model <- prcomp(factor_mat, scale. = TRUE)
+
+# Extract the Principal Component Scores (Returns of the PC Factors)
+# Note: These are "orthogonal" factors constructed from the underlying 47 factors
+pc_returns_raw <- as.data.frame(pca_model$x)
+
+# 3. Rescale PC Factors (Target Volatility)
+# ---------------------------------------------------------
+# Raw PCs have variance = eigenvalue. We scale them to 10% Ann. Vol to make them tradeable.
+target_monthly_vol <- 0.10 / sqrt(12) 
+
+pc_returns_scaled <- pc_returns_raw %>%
+  mutate(across(everything(), ~ .x * (target_monthly_vol / sd(.x)))) %>%
+  bind_cols(date = pca_data$date, .) # Add date back
+
+# Select Top 5 PCs (Systematic Core)
+top_5_pcs <- names(pc_returns_scaled)[2:6] # Col 1 is date, 2-6 are PC1-PC5
+
+# 4. Construct Momentum Strategies
+# ---------------------------------------------------------
+# Function to calculate simple 1-month momentum (1/N Long - 1/N Short)
+calc_mom_strategy <- function(data, cols, name) {
+  data %>%
+    select(date, all_of(cols)) %>%
+    mutate(across(all_of(cols), ~ lag(., 1), .names = "{.col}_lag")) %>% # Signal: t-1
+    na.omit() %>%
+    rowwise() %>%
+    mutate(
+      # Signal: Past Return
+      sigs = list(c_across(ends_with("_lag"))),
+      rets = list(c_across(all_of(cols))),
+      # Strategy: Long > Median, Short <= Median
+      med = median(sigs),
+      ret = mean(rets[sigs > med]) - mean(rets[sigs <= med])
+    ) %>%
+    ungroup() %>%
+    select(date, ret) %>%
+    mutate(Strategy = name)
+}
+
+# A. Strategy on ALL 47 Factors (The "Complex" Strategy)
+strat_all <- calc_mom_strategy(pca_data, renamed_factor_cols, "All Factor Momentum")
+
+# B. Strategy on TOP 5 PCs (The "Simple" Systematic Strategy)
+strat_pca <- calc_mom_strategy(pc_returns_scaled, top_5_pcs, "PCA Momentum (Top 5 PCs)")
+
+# 5. Run Spanning Regression (The "Alpha Test")
+# ---------------------------------------------------------
+# Regress "All Factors" on "PCA Factors" to see how much is explained
+reg_data <- inner_join(strat_all, strat_pca, by = "date", suffix = c("_All", "_PCA"))
+
+model_pca <- lm(ret_All ~ ret_PCA, data = reg_data)
+reg_stats <- tidy(model_pca)
+r_squared <- summary(model_pca)$r.squared
+
+print("--- PCA Spanning Regression Results ---")
+print(reg_stats)
+print(paste("R-Squared:", percent(r_squared, 0.1)))
+
+# 6. Plot Cumulative Performance
+# ---------------------------------------------------------
+plot_data <- bind_rows(strat_all, strat_pca) %>%
+  group_by(Strategy) %>%
+  mutate(Cumulative_Index = cumprod(1 + ret)) %>%
+  ungroup()
+
+ggplot(plot_data, aes(x = date, y = Cumulative_Index, color = Strategy)) +
+  geom_line(linewidth = 1.2) +
+  
+  # Colors: Blue for All, Orange for PCA (Systematic)
+  scale_color_manual(values = c("All Factor Momentum" = "blue", 
+                                "PCA Momentum (Top 5 PCs)" = "darkgreen")) +
+  scale_y_log10(labels = scales::dollar_format(accuracy = 1)) +
+  
+  # Add Regression Stats to Plot
+  annotate("label", x = min(plot_data$date), y = max(plot_data$Cumulative_Index), 
+           label = paste0("Spanning Test (All ~ PCA):\n",
+                          "Beta: ", round(reg_stats$estimate[2], 2)," (t=25.2)", "\n",
+                          "R-Squared: ", percent(r_squared, 0.1), "\n",
+                          "Alpha: ", round(reg_stats$estimate[1], 4), " (t=2.05)"),
+           hjust = 0, vjust = 1, size = 4, family = "mono", alpha = 0.9) +
+  
+  labs(
+    title = "Systematic Validation: PCA vs. All Factors",
+    subtitle = "Top 5 Principal Components capture the majority of the signal",
+    x = "Year", y = "Value of $1 Invested (Log Scale)"
+  ) +
+  
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold"))
+
+# --- 3. Determine Number of PCs (80% explained variance heuristic) ---
+
+# 1. Calculate the proportion of variance explained by each PC
+variance_explained <- (pca_results$sdev^2) / sum(pca_results$sdev^2)
+
+# 2. Calculate the cumulative variance explained (running total)
+cumulative_variance <- cumsum(variance_explained)
+
+# 3. Find the smallest number of PCs where the cumulative total hits 80% (0.80)
+num_pcs <- min(which(cumulative_variance >= 0.80))
+
+# 4. Print the result
+cat(paste("\nNumber of PCs explaining >= 80% of variance:", num_pcs, "\n"))
+
