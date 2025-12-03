@@ -3267,3 +3267,265 @@ num_pcs <- min(which(cumulative_variance >= 0.80))
 # 4. Print the result
 cat(paste("\nNumber of PCs explaining >= 80% of variance:", num_pcs, "\n"))
 
+
+
+
+
+
+
+
+
+
+
+######################## DAILY DATA REPLICATION SECTION BELOW ########################
+# --- 0. Libraries ---
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(zoo)
+library(ggplot2)
+library(scales)
+library(frenchdata)
+
+# --- 1. Load and Clean DAILY Data (Robust Version) ---
+# Ensure "Daily_Factor_and_Themes_Data.RData" is in your working directory
+load("Daily_Factor_and_Themes_Data.RData")
+
+# Load and merge
+d_factors <- all_factors_daily_vw_cap %>% mutate(date = ymd(date))
+d_themes  <- all_themes_daily_vw_cap %>% mutate(date = ymd(date))
+
+# Merge and Pivot
+daily_data <- bind_rows(d_factors, d_themes) %>%
+  select(date, name, ret) %>%
+  pivot_wider(names_from = name, values_from = ret) %>%
+  arrange(date)
+
+# *** CRITICAL FIX: Force numeric conversion on all factor columns ***
+# We exclude 'date' from this operation.
+daily_data_numeric <- daily_data %>%
+  mutate(across(-date, ~ as.numeric(as.character(.)))) %>%
+  na.omit() # Drop rows with any NAs (e.g. early history)
+
+# Rename columns using your map if it exists
+if(exists("factor_rename_map")) {
+  daily_data_numeric <- daily_data_numeric %>% 
+    rename(any_of(factor_rename_map))
+}
+
+# Update target columns based on what survived the numeric conversion
+target_cols <- setdiff(names(daily_data_numeric), "date")
+
+print(paste("Loaded daily data for", length(target_cols), "factors."))
+
+# --- 2. Signal Calculation (Daily Rolling) ---
+LOOKBACK_DAYS <- 21 # ~1 Month
+EXECUTION_LAG <- 1  # 1 Day Lag
+
+# Calculate signals for Factor Momentum
+daily_signals <- daily_data_numeric %>%
+  select(date, all_of(target_cols)) %>%
+  mutate(across(all_of(target_cols), 
+                # Rolling 21-day cumulative log return
+                ~ rollapply(log(1 + .), width = LOOKBACK_DAYS, FUN = sum, fill = NA, align = "right"),
+                .names = "{.col}_sig_raw")) %>%
+  # Apply 1-day Execution Lag to the Signal
+  mutate(across(ends_with("_sig_raw"), ~ lag(., n = EXECUTION_LAG))) %>%
+  na.omit()
+
+# --- 3. Resample to Monthly Rebalancing ---
+# Get last trading day of each month for Factor Momentum
+rebal_dates_df <- daily_signals %>%
+  mutate(month = floor_date(date, "month")) %>%
+  group_by(month) %>%
+  filter(date == max(date)) %>%
+  ungroup() %>%
+  select(date, ends_with("_sig_raw"))
+
+# --- 4. Calculate Forward Monthly Returns ---
+# Calculate NEXT month's return from daily data
+# Logic: Aggregate daily returns for Month T+1
+monthly_returns_from_daily <- daily_data_numeric %>%
+  mutate(month = floor_date(date, "month")) %>%
+  group_by(month) %>%
+  summarise(across(all_of(target_cols), ~ prod(1 + .) - 1)) %>% # Geometric sum
+  # Shift returns BACK by 1 month to align with the signal from the PREVIOUS month
+  mutate(join_date = month %m-% months(1)) 
+
+# --- 5. Merge Signals and Returns for Factor Momentum ---
+
+# A. Prepare Signals
+signals_for_merge <- rebal_dates_df %>%
+  mutate(join_date = floor_date(date, "month")) %>%
+  select(join_date, ends_with("_sig_raw"))
+
+# B. Prepare Returns
+returns_for_merge <- monthly_returns_from_daily %>%
+  rename_with(~paste0(., "_ret"), all_of(target_cols)) %>%
+  select(join_date, ends_with("_ret"))
+
+# C. Merge
+strategy_df <- inner_join(signals_for_merge, returns_for_merge, by = "join_date") %>%
+  mutate(date = rebal_dates_df$date[match(join_date, floor_date(rebal_dates_df$date, "month"))]) 
+
+# D. Define Column Lists for Loop
+sig_cols <- names(strategy_df)[grep("_sig_raw$", names(strategy_df))]
+ret_cols <- names(strategy_df)[grep("_ret$", names(strategy_df))]
+
+# --- 6. Calculate Factor Momentum Strategy Returns ---
+factor_mom_daily_lag <- strategy_df %>%
+  rowwise() %>%
+  mutate(
+    sigs = list(as.numeric(c_across(all_of(sig_cols)))),
+    rets = list(as.numeric(c_across(all_of(ret_cols)))),
+    
+    # Median Split Logic
+    median_sig = median(sigs, na.rm = TRUE),
+    
+    # Identify positions
+    idx_long  = list(which(sigs > median_sig)),
+    idx_short = list(which(sigs <= median_sig)),
+    
+    # Calculate returns
+    ret_long  = if(length(idx_long) > 0) mean(rets[idx_long], na.rm=TRUE) else 0,
+    ret_short = if(length(idx_short) > 0) mean(rets[idx_short], na.rm=TRUE) else 0,
+    
+    # Long-Short Return
+    mom_return = ret_long - ret_short
+  ) %>%
+  ungroup() %>%
+  select(date, ret_long, ret_short, mom_return) %>%
+  na.omit()
+
+# --- 7. Load and Process Industry Data for Lagged Momentum ---
+# We need daily industry returns to calculate a lagged signal
+
+# Download 17 Industry Portfolios daily data
+ff_17_industry_daily_raw <- download_french_data("17 Industry Portfolios [Daily]") # Ensure daily freq
+
+# Process Daily Industry Data
+industry_names <- names(ff_17_industry_daily_raw$subsets$data[[1]])[-1] # Remove date column
+
+daily_industry_data <- ff_17_industry_daily_raw$subsets$data[[1]] %>%
+  mutate(
+    date = ymd(date), # Ensure date format
+    across(all_of(industry_names), ~ as.numeric(.) / 100) # Convert to decimal
+  ) %>%
+  rename_with(str_to_lower) %>%
+  filter(date >= min(daily_data_numeric$date) & date <= max(daily_data_numeric$date))
+
+industry_cols_daily <- setdiff(names(daily_industry_data), "date")
+
+# Calculate Daily Rolling Signals for Industries (Lagged)
+daily_industry_signals <- daily_industry_data %>%
+  select(date, all_of(industry_cols_daily)) %>%
+  mutate(across(all_of(industry_cols_daily), 
+                ~ rollapply(log(1 + .), width = LOOKBACK_DAYS, FUN = sum, fill = NA, align = "right"),
+                .names = "{.col}_sig_raw")) %>%
+  # Apply 1-day Execution Lag
+  mutate(across(ends_with("_sig_raw"), ~ lag(., n = EXECUTION_LAG))) %>%
+  na.omit()
+
+# Resample Industry Signals to Monthly Rebalancing
+industry_rebal_dates_df <- daily_industry_signals %>%
+  mutate(month = floor_date(date, "month")) %>%
+  group_by(month) %>%
+  filter(date == max(date)) %>%
+  ungroup() %>%
+  select(date, ends_with("_sig_raw"))
+
+# Calculate Forward Monthly Returns for Industries
+monthly_industry_returns <- daily_industry_data %>%
+  mutate(month = floor_date(date, "month")) %>%
+  group_by(month) %>%
+  summarise(across(all_of(industry_cols_daily), ~ prod(1 + .) - 1)) %>%
+  mutate(join_date = month %m-% months(1))
+
+# Merge Industry Signals and Returns
+industry_signals_merge <- industry_rebal_dates_df %>%
+  mutate(join_date = floor_date(date, "month")) %>%
+  select(join_date, ends_with("_sig_raw"))
+
+industry_returns_merge <- monthly_industry_returns %>%
+  rename_with(~paste0(., "_ret"), all_of(industry_cols_daily)) %>%
+  select(join_date, ends_with("_ret"))
+
+industry_strategy_df <- inner_join(industry_signals_merge, industry_returns_merge, by = "join_date") %>%
+  mutate(date = industry_rebal_dates_df$date[match(join_date, floor_date(industry_rebal_dates_df$date, "month"))])
+
+# Define Column Lists for Industry Strategy
+ind_sig_cols <- names(industry_strategy_df)[grep("_sig_raw$", names(industry_strategy_df))]
+ind_ret_cols <- names(industry_strategy_df)[grep("_ret$", names(industry_strategy_df))]
+
+# Calculate Lagged Industry Momentum Strategy Returns
+industry_mom_daily_lag <- industry_strategy_df %>%
+  rowwise() %>%
+  mutate(
+    sigs = list(as.numeric(c_across(all_of(ind_sig_cols)))),
+    rets = list(as.numeric(c_across(all_of(ind_ret_cols)))),
+    
+    median_sig = median(sigs, na.rm = TRUE),
+    
+    idx_long  = list(which(sigs > median_sig)),
+    idx_short = list(which(sigs <= median_sig)),
+    
+    ret_long  = if(length(idx_long) > 0) mean(rets[idx_long], na.rm=TRUE) else 0,
+    ret_short = if(length(idx_short) > 0) mean(rets[idx_short], na.rm=TRUE) else 0,
+    
+    mom_return = ret_long - ret_short
+  ) %>%
+  ungroup() %>%
+  select(date, ret_long, ret_short, mom_return) %>%
+  na.omit()
+
+# --- 8. Comparison Plot: Factor Momentum vs. Industry Momentum (Both Lagged) ---
+
+# Prepare Data for Plotting
+factor_mom_ready <- factor_mom_daily_lag %>%
+  select(date, momentum_return = mom_return) %>%
+  mutate(strategy_type = "Factor Momentum (1-Day Lag)")
+
+industry_mom_ready <- industry_mom_daily_lag %>%
+  select(date, momentum_return = mom_return) %>%
+  mutate(strategy_type = "Industry Momentum (1-Day Lag)")
+
+# Combine Data
+common_start <- max(min(factor_mom_ready$date), min(industry_mom_ready$date))
+
+comparison_data <- bind_rows(factor_mom_ready, industry_mom_ready) %>%
+  filter(date >= common_start) %>%
+  arrange(strategy_type, date) %>%
+  group_by(strategy_type) %>%
+  mutate(Cumulative_Return = cumprod(1 + momentum_return)) %>%
+  ungroup()
+
+# Plot
+print(
+  ggplot(comparison_data, aes(x = date, y = Cumulative_Return, color = strategy_type)) +
+    geom_line(linewidth = 1) +
+    
+    # Log scale
+    scale_y_log10(
+      breaks = scales::log_breaks(n = 10),
+      labels = scales::label_number(accuracy = 0.1)
+    ) +
+    
+    # Colors
+    scale_color_manual(values = c("Industry Momentum (1-Day Lag)" = "black", 
+                                  "Factor Momentum (1-Day Lag)" = "blue")) +
+    
+    labs(
+      title = "Cumulative Performance: Factor vs. Industry Momentum (Both Lagged)",
+      subtitle = "Daily Signal with 1-Day Implementation Lag applied to both strategies",
+      x = "Year", 
+      y = "Cumulative Performance ($)", 
+      color = "Strategy"
+    ) +
+    
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "top",
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+)
