@@ -143,12 +143,12 @@ wrds <- dbConnect(
   dbname = "wrds",
   port = 9737,
   sslmode = "require",
-  user = Sys.getenv("WRDS_USER"),
-  password = Sys.getenv("WRDS_PASSWORD")
+  user = Sys.getenv("WRDS_USER"),   # WRDS username from environment variable
+  password = Sys.getenv("WRDS_PASSWORD") # WRDS password from environment variable
 )
 
 # ------------------------------------------------------------------------------
-# 2.2 CRSP Monthly (Returns) - CORRECTED
+# 2.2 CRSP Monthly (Returns)
 # ------------------------------------------------------------------------------
 message("Processing CRSP Monthly Data...")
 
@@ -200,7 +200,7 @@ crsp_monthly <- crsp_raw |>
     )
   )
 
-# STEP 2: Now calculate Lagged Market Cap (using the updated object)
+# STEP 2: Now calculate Lagged Market Cap
 crsp_monthly <- crsp_monthly |>
   left_join(
     crsp_monthly |> 
