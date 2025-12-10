@@ -21,6 +21,7 @@ library(httr2)        # HTTP requests (for FRED/CPI)
 library(dbplyr)       # Database backend for dplyr
 library(RPostgres)    # WRDS connection
 library(lubridate)    # Date manipulation
+library(zoo)          # For rolling window calculations
 
 # Define analysis window
 start_date <- ymd("1960-01-01")
@@ -127,6 +128,22 @@ cpi_monthly <- request(cpi_url) |>
   )
 
 dbWriteTable(tidy_finance, "cpi_monthly", cpi_monthly, overwrite = TRUE)
+
+# ------------------------------------------------------------------------------
+# 1.5 Fama-French Momentum Factor (Benchmark)
+# ------------------------------------------------------------------------------
+message("Downloading Momentum Factor...")
+factors_mom_monthly_raw <- download_french_data("Momentum Factor (Mom)")
+
+factors_mom_monthly <- factors_mom_monthly_raw$subsets$data[[1]] |>
+  mutate(
+    date = floor_date(ymd(str_c(date, "01")), "month"),
+    mom = as.numeric(Mom) / 100
+  ) |>
+  select(date, mom) |>
+  filter(date >= start_date & date <= end_date)
+
+dbWriteTable(tidy_finance, "factors_mom_monthly", factors_mom_monthly, overwrite = TRUE)
 
 
 # ==============================================================================
@@ -494,11 +511,100 @@ print("--- Market Factor (Mkt-RF) Regression ---")
 print(summary(lm(mkt_excess ~ mkt_excess_replicated, data = validation_mkt)))
 
 
+# ==============================================================================
+# PHASE 3.6: MOMENTUM FACTOR REPLICATION (Zoo Version)
+# ==============================================================================
+message("Replicating Momentum Factor...")
 
+# 1. Load Data
+crsp_mom_data <- tbl(tidy_finance, "crsp_monthly") |>
+  select(permno, date, ret, mktcap, mktcap_lag, exchange) |>
+  collect() |>
+  mutate(date = ymd(date))
 
+# 2. Calculate Momentum Signal (12-1 Month Return) using ZOO
+# Logic: 
+#   1. Calculate 11-month cumulative return (compounded) ending at month t.
+#   2. Lag this result by 2 months. 
+#   Result: At month t, the signal represents returns from t-12 to t-2.
 
+crsp_mom_signal <- crsp_mom_data |>
+  arrange(permno, date) |>
+  group_by(permno) |>
+  mutate(
+    # Helper: Gross Return = 1 + r
+    gross_ret = 1 + ret,
+    
+    # Calculate 11-month rolling product (right-aligned)
+    # width = 11 means looking at current + 10 previous months
+    roll_ret_11m = zoo::rollapplyr(gross_ret, width = 11, FUN = prod, fill = NA) - 1,
+    
+    # Lag by 2 months to create the "Skip Month" (t-1)
+    mom_signal = lag(roll_ret_11m, 2)
+  ) |>
+  ungroup() |>
+  filter(!is.na(mom_signal) & !is.na(mktcap_lag)) |>
+  select(permno, date, exchange, mom_signal, mktcap_lag, ret_excess = ret)
 
+# 3. Portfolio Sorting (2x3)
+# Function to assign portfolios based on Monthly Breakpoints
+assign_mom_portfolio <- function(data) {
+  # NYSE-only Breakpoints
+  nyse_subset <- data |> filter(exchange == "NYSE")
+  
+  # Size Breakpoint (Median)
+  size_bp <- quantile(nyse_subset$mktcap_lag, probs = 0.5, na.rm = TRUE)
+  
+  # Momentum Breakpoints (30th and 70th percentiles)
+  mom_bp <- quantile(nyse_subset$mom_signal, probs = c(0.3, 0.7), na.rm = TRUE)
+  
+  data |>
+    mutate(
+      # Size Sort
+      portfolio_size = if_else(mktcap_lag <= size_bp, "Small", "Big"),
+      
+      # Momentum Sort
+      portfolio_mom = case_when(
+        mom_signal <= mom_bp[1] ~ "Low",    # Losers
+        mom_signal > mom_bp[2] ~ "High",    # Winners
+        TRUE ~ "Neutral"
+      )
+    )
+}
 
+# Apply sorting per month
+# Note: map_dfr is from purrr (part of tidyverse)
+mom_portfolios <- crsp_mom_signal |>
+  group_by(date) |>
+  group_split() |>
+  map_dfr(assign_mom_portfolio)
+
+# 4. Construct Factor (Winners - Losers)
+mom_replicated <- mom_portfolios |>
+  group_by(date, portfolio_size, portfolio_mom) |>
+  summarize(ret = weighted.mean(ret_excess, mktcap_lag), .groups = "drop") |>
+  group_by(date) |>
+  summarize(
+    # (Small High + Big High)/2 - (Small Low + Big Low)/2
+    mom_replicated = mean(ret[portfolio_mom == "High"]) - mean(ret[portfolio_mom == "Low"])
+  )
+
+# Save to DB
+dbWriteTable(tidy_finance, "mom_replicated", mom_replicated, overwrite = TRUE)
+
+# 5. Validation
+# Ensure you have run Phase 1.5 (Benchmark Download) from the previous step before this
+if(dbExistsTable(tidy_finance, "factors_mom_monthly")) {
+  validation_mom <- tbl(tidy_finance, "factors_mom_monthly") |>
+    collect() |>
+    mutate(date = ymd(date)) |>
+    inner_join(mom_replicated, join_by(date))
+  
+  print("--- Momentum Factor (MOM) Regression ---")
+  print(summary(lm(mom ~ mom_replicated, data = validation_mom)))
+} else {
+  message("Official Momentum Factor data not found in DB. Skipping validation regression.")
+}
 
 # ==============================================================================
 # PHASE 4: EVALUATION
