@@ -810,3 +810,317 @@ ggplot(plot_data, aes(x = date, y = Cumulative_Return, color = Factor)) +
   theme_minimal() +
   scale_y_continuous(labels = percent)
 
+
+
+
+# ==============================================================================
+# PHASE 4: EVALUATION & SANITY CHECKS
+# ==============================================================================
+message("Evaluating Green Light Factors...")
+
+# 1. Load Data
+factors_green <- tbl(tidy_finance, "factors_replicated_green") |> collect()
+factors_ff5   <- tbl(tidy_finance, "factors_ff5_monthly") |> 
+  select(date, mkt_excess, smb, hml, rmw, cma, rf) |> 
+  collect()
+
+# Merge
+analysis_data <- factors_green |>
+  inner_join(factors_ff5, by = "date") |>
+  mutate(date = ymd(date)) |>
+  drop_na()
+
+# ------------------------------------------------------------------------------
+# 2. Performance Statistics (The "Sanity Check")
+# ------------------------------------------------------------------------------
+# We calculate the Mean Annualized Return for each factor.
+# Crucial: Check if the SIGN matches the "Expected Sign" below.
+
+factor_stats <- analysis_data |>
+  select(ends_with("_replicated")) |>
+  pivot_longer(everything(), names_to = "factor", values_to = "ret") |>
+  group_by(factor) |>
+  summarize(
+    Mean_Ann = mean(ret) * 12,
+    Vol_Ann = sd(ret) * sqrt(12),
+    Sharpe = Mean_Ann / Vol_Ann,
+    t_stat = (mean(ret) / (sd(ret) / sqrt(n()))),
+    .groups = "drop"
+  ) |>
+  # Add "Expected Sign" based on Academic Literature
+  mutate(
+    Short_Name = str_remove(factor, "_replicated"),
+    Expected_Sign = case_when(
+      Short_Name %in% c("f_score", "gp_at", "op", "z_score", "o_score") ~ "Positive (+)",
+      Short_Name %in% c("inv", "capx_gr1", "sale_gr1", "netis_at", "oaccruals_at", "noa_at", "ret_60_12") ~ "Negative (-)",
+      TRUE ~ "?"
+    ),
+    Check_Passed = case_when(
+      Expected_Sign == "Positive (+)" & t_stat > 1.5 ~ "OK",
+      Expected_Sign == "Negative (-)" & t_stat < -1.5 ~ "OK",
+      TRUE ~ "Weak/Fail"
+    )
+  ) |>
+  select(Short_Name, Expected_Sign, Mean_Ann, t_stat, Check_Passed) |>
+  arrange(desc(Expected_Sign), desc(t_stat))
+
+print("--- Sanity Check: Do signs match theory? ---")
+print(factor_stats, n = 20)
+
+# ------------------------------------------------------------------------------
+# 3. Correlation Matrix
+# ------------------------------------------------------------------------------
+# Check if your new factors are just duplicates of FF5
+# e.g., 'gp_at' should be highly correlated with 'rmw' (Profitability)
+
+cor_matrix <- analysis_data |>
+  select(ends_with("_replicated"), mkt_excess, smb, hml, rmw, cma) |>
+  cor(use = "pairwise.complete.obs")
+
+# Extract correlations with Official FF5
+ff_correlations <- cor_matrix[grep("_replicated", rownames(cor_matrix)), 
+                              c("mkt_excess", "smb", "hml", "rmw", "cma")]
+
+print("--- Correlation with Official Factors ---")
+print(round(ff_correlations, 2))
+
+# ------------------------------------------------------------------------------
+# 4. Alpha Analysis (Does it add value?)
+# ------------------------------------------------------------------------------
+# We check if these factors generate alpha relative to the standard FF5 model
+run_alphas <- function(data, factor_name) {
+  model <- lm(data[[factor_name]] ~ mkt_excess + smb + hml + rmw + cma, data = data)
+  
+  tibble(
+    Factor = str_remove(factor_name, "_replicated"),
+    Alpha_Ann = coef(model)[1] * 12,
+    t_stat = summary(model)$coefficients[1, "t value"]
+  )
+}
+
+alpha_summary <- names(analysis_data) |>
+  keep(~str_detect(., "_replicated")) |>
+  map_dfr(~run_alphas(analysis_data, .)) |>
+  arrange(desc(abs(t_stat)))
+
+print("--- FF5 Alphas (Unexplained Return) ---")
+print(alpha_summary, n = 20)
+
+
+
+
+
+
+# ==============================================================================
+# MASTER REPLICATION VALIDATION SCRIPT (FIXED)
+# ==============================================================================
+
+# 1. SETUP & LIBRARIES
+library(tidyverse)
+library(RSQLite)
+library(DBI)
+library(scales)
+library(gt)
+library(lubridate)
+
+# --- Configuration ---
+DB_PATH <- "data/tidy_finance_r.sqlite" 
+JKP_FILE <- "[usa]_[all_factors]_[monthly]_[vw_cap].csv" 
+START_DATE <- ymd("1963-07-01")
+END_DATE   <- ymd("2023-12-31")
+
+# ==============================================================================
+# 2. LOAD & INSPECT DATA
+# ==============================================================================
+
+# --- A. Load User's Replicated Factors ---
+message("Loading User Replication Data...")
+con <- dbConnect(SQLite(), DB_PATH, extended_types = TRUE)
+
+if(dbExistsTable(con, "factors_replicated_green")) {
+  user_factors_raw <- tbl(con, "factors_replicated_green") |> collect()
+} else {
+  stop("Table 'factors_replicated_green' not found in database! Run Phase 3 first.")
+}
+dbDisconnect(con)
+
+# --- B. Load Official JKP Factors ---
+message("Loading Official JKP Benchmark...")
+if(!file.exists(JKP_FILE)) stop("JKP CSV file not found.")
+
+jkp_factors_raw <- read.csv(JKP_FILE)
+
+# ==============================================================================
+# 3. CRITICAL FIX: DATE ALIGNMENT
+# ==============================================================================
+message("Aligning Dates (Forcing End-of-Month)...")
+
+# 1. Prepare User Data
+user_factors <- user_factors_raw |>
+  # Ensure date is Date object
+  mutate(date = as.Date(date)) |>
+  # FORCE to End-of-Month (e.g., 1963-07-01 -> 1963-07-31)
+  mutate(date = ceiling_date(date, "month") - days(1)) |>
+  filter(date >= START_DATE & date <= END_DATE)
+
+# 2. Prepare JKP Data
+jkp_factors <- jkp_factors_raw |>
+  as_tibble() |>
+  select(date, name, ret) |>
+  mutate(date = as.Date(date)) |>
+  # FORCE to End-of-Month
+  mutate(date = ceiling_date(date, "month") - days(1)) |>
+  filter(date >= START_DATE & date <= END_DATE) |>
+  pivot_wider(names_from = name, values_from = ret)
+
+# 3. DEBUG: Check Date Overlap
+user_dates <- range(user_factors$date)
+jkp_dates  <- range(jkp_factors$date)
+
+cat(sprintf("User Date Range: %s to %s\n", user_dates[1], user_dates[2]))
+cat(sprintf("JKP  Date Range: %s to %s\n", jkp_dates[1], jkp_dates[2]))
+
+common_dates <- intersect(user_factors$date, jkp_factors$date)
+cat(sprintf("Number of Overlapping Months: %d\n", length(common_dates)))
+
+if(length(common_dates) < 12) stop("CRITICAL: Less than 12 overlapping months found. Check your date filters!")
+
+# ==============================================================================
+# 4. PERFORM VALIDATION CHECKS (ROBUST LOOP)
+# ==============================================================================
+
+# Define Map
+mapping <- tribble(
+  ~User_Factor,      ~JKP_Factor,      ~Description,
+  "bm_replicated",   "be_me",          "Book-to-Market (Value)",
+  "op_replicated",   "ope_be",         "Operating Profitability",
+  "inv_replicated",  "at_gr1",         "Investment (Asset Growth)",
+  "gp_at_replicated","gp_at",          "Gross Profitability",
+  "f_score_replicated","f_score",      "Piotroski F-Score",
+  "z_score_replicated","z_score",      "Altman Z-Score",
+  "o_score_replicated","o_score",      "Ohlson O-Score",
+  "noa_at_replicated", "noa_at",       "Net Operating Assets",
+  "oaccruals_at_replicated", "oaccruals_at", "Accruals",
+  "netis_at_replicated", "netis_at",   "Net Equity Issuance",
+  "at_be_replicated", "at_be",         "Leverage",
+  "sale_gr1_replicated", "sale_gr1",   "Sales Growth",
+  "inv_gr1_replicated", "inv_gr1",     "Inventory Growth",
+  "ret_60_12_replicated", "ret_60_12", "Long Term Reversal"
+)
+
+message("Running Validation Logic...")
+results_store <- list()
+
+for(i in 1:nrow(mapping)) {
+  u_name <- mapping$User_Factor[i]
+  j_name <- mapping$JKP_Factor[i]
+  
+  # Check if columns exist
+  if(u_name %in% names(user_factors) && j_name %in% names(jkp_factors)) {
+    
+    # Merge specific pair
+    temp_df <- inner_join(
+      user_factors |> select(date, user_ret = all_of(u_name)),
+      jkp_factors  |> select(date, jkp_ret = all_of(j_name)),
+      by = "date"
+    ) |> drop_na()
+    
+    # SAFETY CHECK: Do we have enough data points?
+    if(nrow(temp_df) > 12) {
+      # 1. Correlation
+      cor_val <- cor(temp_df$user_ret, temp_df$jkp_ret)
+      
+      # 2. Regression (User ~ JKP)
+      model <- lm(user_ret ~ jkp_ret, data = temp_df)
+      beta  <- coef(model)[2]
+      alpha <- coef(model)[1]
+      
+      # 3. Scale Check
+      mean_diff <- mean(temp_df$user_ret) - mean(temp_df$jkp_ret)
+      
+      # Store
+      results_store[[u_name]] <- tibble(
+        Factor_User = u_name,
+        Factor_JKP = j_name,
+        N_Months = nrow(temp_df),
+        Correlation = cor_val,
+        Beta = beta,
+        Alpha_Monthly = alpha,
+        Scale_Diff = mean_diff
+      )
+    } else {
+      warning(paste("Skipping", u_name, "- Not enough overlapping data points."))
+    }
+  } else {
+    # Print missing columns for debugging
+    if(!u_name %in% names(user_factors)) warning(paste("Missing in USER data:", u_name))
+    if(!j_name %in% names(jkp_factors))  warning(paste("Missing in JKP  data:", j_name))
+  }
+}
+
+# Bind Results
+if(length(results_store) > 0) {
+  validation_report <- bind_rows(results_store)
+  
+  # ==============================================================================
+  # 5. GENERATE REPORT
+  # ==============================================================================
+  CORR_THRESHOLD_PASS <- 0.90
+  CORR_THRESHOLD_WARN <- 0.75
+  
+  final_report <- validation_report |> 
+    mutate(
+      Status = case_when(
+        Correlation >= CORR_THRESHOLD_PASS ~ "PASS (Green)",
+        Correlation >= CORR_THRESHOLD_WARN ~ "WARNING (Yellow)",
+        Correlation < 0 ~ "FAIL (Inverted Sign!)",
+        TRUE ~ "FAIL (Low Correlation)"
+      )
+    ) |> 
+    arrange(desc(Correlation))
+  
+  print(as.data.frame(final_report)) # Use base dataframe print for full visibility
+  
+  # ==============================================================================
+  # 6. VISUALIZATION (Top 4)
+  # ==============================================================================
+  # Safely pick top factors
+  if(nrow(final_report) >= 2) {
+    factors_to_plot <- head(final_report, 4)
+    
+    plot_data <- list()
+    for(i in 1:nrow(factors_to_plot)) {
+      u_name <- factors_to_plot$Factor_User[i]
+      j_name <- factors_to_plot$Factor_JKP[i]
+      
+      df <- inner_join(
+        user_factors |> select(date, user_ret = all_of(u_name)),
+        jkp_factors  |> select(date, jkp_ret = all_of(j_name)),
+        by = "date"
+      ) |> 
+        mutate(
+          User_Cum = cumprod(1 + user_ret),
+          JKP_Cum  = cumprod(1 + jkp_ret),
+          Factor   = u_name
+        )
+      plot_data[[i]] <- df
+    }
+    
+    plot_df <- bind_rows(plot_data) |> 
+      pivot_longer(cols = c(User_Cum, JKP_Cum), names_to = "Source", values_to = "Wealth")
+    
+    p <- ggplot(plot_df, aes(x = date, y = Wealth, color = Source, linetype = Source)) +
+      geom_line(size = 0.8) +
+      facet_wrap(~Factor, scales = "free_y") +
+      scale_y_log10() +
+      scale_color_manual(values = c("JKP_Cum" = "black", "User_Cum" = "#2ecc71")) +
+      labs(title = "Replication Sanity Check: Cumulative Returns (Top Matches)",
+           y = "Wealth Index (Log Scale)") +
+      theme_minimal()
+    
+    print(p)
+  }
+  
+} else {
+  stop("No factors were successfully validated. Check 'Missing' warnings above.")
+}
