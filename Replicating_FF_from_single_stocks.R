@@ -153,8 +153,8 @@ wrds <- dbConnect(
 message("Processing CRSP Monthly Data...")
 
 # Lazy query definitions
-msf_db <- tbl(wrds, I("crsp.msf_v2")) 
-stk_info_db <- tbl(wrds, I("crsp.stksecurityinfohist")) 
+msf_db <- tbl(wrds, I("crsp.msf_v2")) # tbl() is a function that queries a table without loading it into memory, I() allows for non-standard table names
+stk_info_db <- tbl(wrds, I("crsp.stksecurityinfohist")) # Security Info table
 
 # Join MSF with Security Info to filter valid common stocks
 crsp_raw <- msf_db |>
@@ -220,7 +220,7 @@ dbWriteTable(tidy_finance, "crsp_monthly", crsp_monthly, overwrite = TRUE)
 # ------------------------------------------------------------------------------
 message("Processing Compustat Data...")
 
-# Fetch Fundamental Annual Data
+# 1. Fetch Fundamental Annual Data
 compustat_raw <- tbl(wrds, I("comp.funda")) |>
   filter(
     indfmt == "INDL" & datafmt == "STD" & consol == "C" & curcd == "USD" &
@@ -229,15 +229,25 @@ compustat_raw <- tbl(wrds, I("comp.funda")) |>
   select(gvkey, datadate, seq, ceq, at, lt, txditc, txdb, itcb, pstkrv, pstkl, pstk, capx, oancf, sale, cogs, xint, xsga) |>
   collect()
 
-# Calculate Derived Accounting Variables
-# Step 1: BE and OP, and define 'year'
-compustat_processed <- compustat_raw |>
+# 2. Implement 2-Year Compustat Requirement (Exercise 2)
+# Mitigation for Backfilling Bias:
+# We filter out the first 2 years of data for every firm.
+compustat_filtered <- compustat_raw |>
+  arrange(gvkey, datadate) |>
+  group_by(gvkey) |>
+  mutate(firm_age = row_number()) |>
+  ungroup() |>
+  filter(firm_age > 2) # KEEP only if history > 2 years
+
+# 3. Calculate Derived Accounting Variables (BE, OP)
+compustat_processed <- compustat_filtered |>
   mutate(
     # Book Equity (BE) = SHE + Deferred Taxes - Preferred Stock
     be = coalesce(seq, ceq + pstk, at - lt) + 
       coalesce(txditc, txdb + itcb, 0) - 
       coalesce(pstkrv, pstkl, pstk, 0),
     be = if_else(be <= 0, NA, be),
+    
     # Operating Profitability (OP) = Revenues - COGS - SGA - Interest / Book Equity
     op = (sale - coalesce(cogs, 0) - coalesce(xsga, 0) - coalesce(xint, 0)) / be,
     year = year(datadate)
@@ -246,17 +256,17 @@ compustat_processed <- compustat_raw |>
   filter(datadate == max(datadate)) |> # Handle duplicate fiscal year-ends
   ungroup()
 
-# Step 2: Investment (INV) = Asset Growth
+# 4. Calculate Investment (INV) = Asset Growth
 # Requires self-join to get t-1 assets
 compustat_final <- compustat_processed |>
   left_join(
     compustat_processed |> select(gvkey, year, at_lag = at) |> mutate(year = year + 1),
     join_by(gvkey, year)
   ) |>
-  mutate(inv = at / at_lag - 1, inv = if_else(at_lag <= 0, NA, inv))
+  mutate(inv = at / at_lag - 1, inv = if_else(at_lag <= 0, NA, inv)) # formula means: (current assets - prior assets) / prior assets
 
+# Save to DB
 dbWriteTable(tidy_finance, "compustat", compustat_final, overwrite = TRUE)
-
 # ------------------------------------------------------------------------------
 # 2.4 Linking CRSP and Compustat (CCM)
 # ------------------------------------------------------------------------------
@@ -268,7 +278,7 @@ ccm_link <- tbl(wrds, I("crsp.ccmxpf_lnkhist")) |>
   collect() |>
   mutate(linkenddt = replace_na(linkenddt, today()))
 
-# Link gvkey to permno based on date ranges
+# Link gvkey to permno based on date ranges, gvkey is the id for the Compustat data and permno is the id for the CRSP data (both about stocks)
 ccm_merged <- crsp_monthly |>
   inner_join(ccm_link, join_by(permno), relationship = "many-to-many") |>
   filter(!is.na(gvkey) & (date >= linkdt & date <= linkenddt)) |>
@@ -379,7 +389,8 @@ factors_value <- portfolios_long |>
   group_by(portfolio_size, portfolio_bm, date) |>
   summarize(ret = weighted.mean(ret_excess, mktcap_lag), .groups = "drop") |>
   group_by(date) |>
-  summarize(hml_replicated = mean(ret[portfolio_bm == 3]) - mean(ret[portfolio_bm == 1]))
+  summarize(hml_replicated = mean(ret[portfolio_bm == 3]) - mean(ret[portfolio_bm == 1])) 
+# High B/M - Low B/M (but we do it with the averages of the two size portfolios)
 
 # RMW (Profitability): Robust OP - Weak OP
 factors_prof <- portfolios_long |>
@@ -412,6 +423,82 @@ factors_replicated <- factors_size |>
 
 # Save Proprietary Factors
 dbWriteTable(tidy_finance, "factors_replicated", factors_replicated, overwrite = TRUE)
+
+
+
+
+
+
+
+
+
+# ==============================================================================
+# PHASE 3.5: MARKET & RF REPLICATION
+# ==============================================================================
+message("Replicating Market and RF...")
+
+# ------------------------------------------------------------------------------
+# 1. Replicate Risk-Free Rate (RF)
+# ------------------------------------------------------------------------------
+# Fama-French use the 1-month T-Bill return from Ibbotson Associates.
+# A common public proxy is the 1-Month Treasury Constant Maturity Rate (GS1M) from FRED.
+# Note: This is a rate (yield), so we divide by 1200 to approximate monthly return.
+
+rf_url <- "https://fred.stlouisfed.org/graph/fredgraph.csv?id=GS1M"
+
+rf_replicated <- request(rf_url) |>
+  req_perform() |>
+  resp_body_string() |>
+  read_csv() |>
+  mutate(
+    date = floor_date(as.Date(observation_date), "month"),
+    # Convert annualized percentage yield to monthly decimal return approximation
+    rf_proxy = as.numeric(GS1M) / 12 / 100 
+  ) |>
+  select(date, rf_proxy)
+
+# ------------------------------------------------------------------------------
+# 2. Replicate Market Factor (Mkt-RF)
+# ------------------------------------------------------------------------------
+# The Market Factor is the value-weighted excess return of all CRSP firms 
+# that meet the screening criteria (which you already filtered in Phase 2.2).
+
+# We use the 'crsp_monthly' table loaded in Phase 3.1
+mkt_replicated <- crsp_monthly |>
+  group_by(date) |>
+  summarize(
+    # Weighted average of (Ret - RF) = Mkt - RF
+    mkt_excess_replicated = weighted.mean(ret_excess, mktcap_lag, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ------------------------------------------------------------------------------
+# 3. Merge into Main Factor Table
+# ------------------------------------------------------------------------------
+factors_replicated_full <- factors_replicated |>
+  left_join(mkt_replicated, join_by(date)) |>
+  left_join(rf_replicated, join_by(date))
+
+# Save the fully replicated set
+dbWriteTable(tidy_finance, "factors_replicated_full", factors_replicated_full, overwrite = TRUE)
+
+# ------------------------------------------------------------------------------
+# 4. Validate Market Replication
+# ------------------------------------------------------------------------------
+# Compare your Mkt-RF against the official FF Mkt-RF
+validation_mkt <- factors_ff5_monthly |>
+  select(date, mkt_excess) |> # From Official FF5
+  inner_join(factors_replicated_full, join_by(date))
+
+print("--- Market Factor (Mkt-RF) Regression ---")
+print(summary(lm(mkt_excess ~ mkt_excess_replicated, data = validation_mkt)))
+
+
+
+
+
+
+
 
 # ==============================================================================
 # PHASE 4: EVALUATION
