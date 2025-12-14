@@ -901,10 +901,6 @@ p <- ggplot(plot_data, aes(x = date, y = cum_ret, color = source, linetype = sou
 print(p)
 
 # Cleanup
-<<<<<<< HEAD
-=======
-dbDisconnect(tidy_finance)
-message("Script Complete.")
 
 # ==============================================================================
 
@@ -927,5 +923,4 @@ avg_stocks_monthly <- tbl(tidy_finance, "crsp_monthly") |>
 
 print(paste("Average stocks per month:", round(avg_stocks_monthly$average_count)))
 
->>>>>>> 0084eb56deb3bca20f55f61c00dd96e0c08e26eb
 dbDisconnect(tidy_finance)
