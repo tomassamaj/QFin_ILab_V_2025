@@ -167,10 +167,13 @@ wrds <- dbConnect(
 # ------------------------------------------------------------------------------
 # 2.2 CRSP Monthly (Returns)
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 2.2 CRSP Monthly (Returns) with PERMCO Aggregation (CORRECTED)
+# ------------------------------------------------------------------------------
 message("Processing CRSP Monthly Data...")
 
 # Lazy query definitions
-msf_db <- tbl(wrds, I("crsp.msf_v2")) # tbl() is a function that queries a table without loading it into memory, I() allows for non-standard table names
+msf_db <- tbl(wrds, I("crsp.msf_v2")) # Monthly Stock File (Contains PERMCO)
 stk_info_db <- tbl(wrds, I("crsp.stksecurityinfohist")) # Security Info table
 
 # Join MSF with Security Info to filter valid common stocks
@@ -180,25 +183,25 @@ crsp_raw <- msf_db |>
   inner_join(
     stk_info_db |>
       filter(
-        sharetype == "NS" &                   
+        sharetype == "NS" &                    
           securitytype == "EQTY" &              
           securitysubtype == "COM" &            
-          usincflg == "Y" &                     
-          issuertype %in% c("ACOR", "CORP") &   
-          primaryexch %in% c("N", "A", "Q") &   
+          usincflg == "Y" &                      
+          issuertype %in% c("ACOR", "CORP") &    
+          primaryexch %in% c("N", "A", "Q") &    
           conditionaltype %in% c("RW", "NW") &  
-          tradingstatusflg == "A"               
+          tradingstatusflg == "A"                
       ) |> 
-      select(permno, secinfostartdt, secinfoenddt, primaryexch, siccd),
+      # REMOVED permco from here (it's not in this table)
+      select(permno, secinfostartdt, secinfoenddt, primaryexch, siccd), 
     join_by(permno)
   ) |> 
   filter(mthcaldt >= secinfostartdt & mthcaldt <= secinfoenddt) |>
   mutate(date = floor_date(mthcaldt, "month")) |>
-  select(permno, date, ret = mthret, shrout, prc = mthprc, primaryexch, siccd) |>
+  # Select permco here (it comes from msf_db)
+  select(permno, permco, date, ret = mthret, shrout, prc = mthprc, primaryexch, siccd) |>
   collect() |> 
   mutate(date = ymd(date), shrout = shrout * 1000)
-
-
 
 # Load Risk Free Rate from DB
 factors_ff3_mem <- tbl(tidy_finance, "factors_ff3_monthly") |> 
@@ -206,11 +209,12 @@ factors_ff3_mem <- tbl(tidy_finance, "factors_ff3_monthly") |>
   collect() |> 
   mutate(date = ymd(date))
 
-# STEP 1: Calculate Market Cap and clean Exchange
-crsp_monthly <- crsp_raw |>
+# STEP 1: Calculate Market Cap per PERMNO
+crsp_monthly_step1 <- crsp_raw |>
   mutate(
-    mktcap = shrout * prc / 10^6,
-    mktcap = na_if(mktcap, 0),
+    # Handle negative prices (bid/ask average) by taking absolute value
+    mktcap_permno = abs(shrout * prc) / 10^6, 
+    mktcap_permno = na_if(mktcap_permno, 0),
     exchange = case_when(
       primaryexch == "N" ~ "NYSE",
       primaryexch == "A" ~ "AMEX",
@@ -219,17 +223,25 @@ crsp_monthly <- crsp_raw |>
     )
   )
 
-# STEP 2: Now calculate Lagged Market Cap
-crsp_monthly <- crsp_monthly |>
+# STEP 2: Aggregate Market Cap to PERMCO Level
+permco_mktcap <- crsp_monthly_step1 |>
+  group_by(date, permco) |>
+  summarize(mktcap_permco = sum(mktcap_permno, na.rm = TRUE), .groups = "drop")
+
+# STEP 3: Join back and finalize
+crsp_monthly <- crsp_monthly_step1 |>
+  left_join(permco_mktcap, join_by(date, permco)) |>
+  # Use PERMCO market cap for sorting (mktcap), but keep PERMNO return for calculations
+  mutate(mktcap = mktcap_permco) |> 
   left_join(
-    crsp_monthly |> 
+    crsp_monthly_step1 |> 
       mutate(date = date %m+% months(1)) |> 
-      select(permno, date, mktcap_lag = mktcap),
+      select(permno, date, mktcap_lag = mktcap_permno), # Use lagged individual mktcap for weighting returns
     join_by(permno, date)
   ) |>
   left_join(factors_ff3_mem, join_by(date)) |>
   mutate(ret_excess = ret - rf, ret_excess = pmax(ret_excess, -1)) |> 
-  select(-rf) |>
+  select(-rf, -mktcap_permno, -mktcap_permco) |>
   drop_na(ret_excess, mktcap, mktcap_lag)
 
 # Save to DB
