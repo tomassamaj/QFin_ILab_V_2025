@@ -901,4 +901,31 @@ p <- ggplot(plot_data, aes(x = date, y = cum_ret, color = source, linetype = sou
 print(p)
 
 # Cleanup
+<<<<<<< HEAD
+=======
+dbDisconnect(tidy_finance)
+message("Script Complete.")
+
+# ==============================================================================
+
+# Connect to the database
+tidy_finance <- dbConnect(SQLite(), "data/tidy_finance_r.sqlite", extended_types = TRUE)
+
+# 1. Total unique stocks across the entire history (1960-2024)
+total_unique_stocks <- tbl(tidy_finance, "crsp_monthly") |>
+  summarise(n_stocks = n_distinct(permno)) |>
+  collect()
+
+print(paste("Total unique stocks:", total_unique_stocks$n_stocks))
+
+# 2. Average number of stocks per month (to understand sample depth)
+avg_stocks_monthly <- tbl(tidy_finance, "crsp_monthly") |>
+  group_by(date) |>
+  summarise(daily_count = n_distinct(permno)) |>
+  summarise(average_count = mean(daily_count)) |>
+  collect()
+
+print(paste("Average stocks per month:", round(avg_stocks_monthly$average_count)))
+
+>>>>>>> 0084eb56deb3bca20f55f61c00dd96e0c08e26eb
 dbDisconnect(tidy_finance)
