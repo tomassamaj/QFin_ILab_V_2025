@@ -198,6 +198,8 @@ crsp_raw <- msf_db |>
   collect() |> 
   mutate(date = ymd(date), shrout = shrout * 1000)
 
+
+
 # Load Risk Free Rate from DB
 factors_ff3_mem <- tbl(tidy_finance, "factors_ff3_monthly") |> 
   select(date, rf) |> 
@@ -632,6 +634,271 @@ print(summary(lm(rmw ~ rmw_replicated, data = test_data)))
 print("--- CMA Regression ---")
 print(summary(lm(cma ~ cma_replicated, data = test_data)))
 
+
+message("Script Complete.")
+
+
+
+
+
+
+
+# ==============================================================================
+# PHASE 4: EVALUATION & ACADEMIC OUTPUT
+# ==============================================================================
+# --- RECONNECT TO DATABASE FIRST ---
+library(RSQLite)
+library(dplyr)
+library(modelsummary)
+
+# Re-establish connection
+tidy_finance <- dbConnect(SQLite(), "data/tidy_finance_r.sqlite", extended_types = TRUE)
+
+# --- NOW RUN THE TABLE GENERATION ---
+message("Generating Academic Regression Tables...")
+
+# 1. Load Data for Comparison
+factors_ff5_monthly <- tbl(tidy_finance, "factors_ff5_monthly") |>
+  select(date, smb, hml, rmw, cma, mkt_excess) |>
+  collect() |> mutate(date = ymd(date))
+
+factors_mom_monthly <- tbl(tidy_finance, "factors_mom_monthly") |>
+  collect() |> mutate(date = ymd(date))
+
+factors_replicated_full <- tbl(tidy_finance, "factors_replicated_full") |> 
+  collect() |> mutate(date = ymd(date))
+
+mom_replicated <- tbl(tidy_finance, "mom_replicated") |> 
+  collect() |> mutate(date = ymd(date))
+
+# 2. Join Datasets
+test_data <- factors_ff5_monthly |>
+  inner_join(factors_replicated_full, join_by(date), suffix = c("", "_rep")) |>
+  left_join(factors_mom_monthly, join_by(date)) |>
+  inner_join(mom_replicated, join_by(date)) |>
+  drop_na()
+
+# 3. Define Regressions
+regs <- list(
+  "Mkt-RF" = lm(mkt_excess ~ mkt_excess_replicated, data = test_data),
+  "SMB"    = lm(smb ~ smb_replicated, data = test_data),
+  "HML"    = lm(hml ~ hml_replicated, data = test_data),
+  "RMW"    = lm(rmw ~ rmw_replicated, data = test_data),
+  "CMA"    = lm(cma ~ cma_replicated, data = test_data),
+  "MOM"    = lm(mom ~ mom_replicated, data = test_data)
+)
+
+# 4. Print Table
+msummary(
+  regs,
+  fmt = 4,
+  stars = c('*' = .1, '**' = .05, '***' = .01),
+  gof_map = c("nobs", "r.squared"),
+  coef_map = c(
+    "(Intercept)" = "Alpha",
+    "mkt_excess_replicated" = "Beta",
+    "smb_replicated" = "Beta",
+    "hml_replicated" = "Beta",
+    "rmw_replicated" = "Beta",
+    "cma_replicated" = "Beta",
+    "mom_replicated" = "Beta"
+  ),
+  title = "Factor Replication Validity (Official vs. Our Construction)"
+)
+
+
+
+
+# ==============================================================================
+# PHASE 4: EVALUATION - INDIVIDUAL ACADEMIC TABLES
+# ==============================================================================
+
+# 1. Setup & Data Loading ------------------------------------------------------
+library(tidyverse)
+library(RSQLite)
+library(modelsummary)
+
+# Reconnect to DB (Crucial step since connection was closed)
+tidy_finance <- dbConnect(SQLite(), "data/tidy_finance_r.sqlite", extended_types = TRUE)
+
+message("Loading Data for Tables...")
+
+# Load Official FF5 & Momentum
+factors_ff5_monthly <- tbl(tidy_finance, "factors_ff5_monthly") |>
+  select(date, smb, hml, rmw, cma, mkt_excess) |>
+  collect() |> mutate(date = ymd(date))
+
+factors_mom_monthly <- tbl(tidy_finance, "factors_mom_monthly") |>
+  collect() |> mutate(date = ymd(date))
+
+# Load Replicated Factors
+factors_replicated_full <- tbl(tidy_finance, "factors_replicated_full") |> 
+  collect() |> mutate(date = ymd(date))
+
+mom_replicated <- tbl(tidy_finance, "mom_replicated") |> 
+  collect() |> mutate(date = ymd(date))
+
+# Join All Data
+test_data <- factors_ff5_monthly |>
+  inner_join(factors_replicated_full, join_by(date)) |>
+  left_join(factors_mom_monthly, join_by(date)) |>
+  inner_join(mom_replicated, join_by(date)) |>
+  drop_na()
+
+# 2. Define Custom Table Settings ----------------------------------------------
+# Standard academic formatting for asset pricing
+ac_format <- list(
+  fmt = 4,                          # 4 decimal places
+  stars = c('*' = .1, '**' = .05, '***' = .01),
+  gof_map = c("nobs", "r.squared")  # Only show N and R2
+)
+
+# 3. Generate 6 Separate Tables ------------------------------------------------
+
+# --- Table 1: Market Factor (Mkt-RF) ---
+mkt_model <- lm(mkt_excess ~ mkt_excess_replicated, data = test_data)
+msummary(mkt_model, 
+         fmt = ac_format$fmt, stars = ac_format$stars, gof_map = ac_format$gof_map,
+         coef_map = c('(Intercept)' = 'Alpha', 'mkt_excess_replicated' = 'Beta'),
+         title = "Table 1: Market Factor Replication")
+
+# --- Table 2: Size Factor (SMB) ---
+smb_model <- lm(smb ~ smb_replicated, data = test_data)
+msummary(smb_model, 
+         fmt = ac_format$fmt, stars = ac_format$stars, gof_map = ac_format$gof_map,
+         coef_map = c('(Intercept)' = 'Alpha', 'smb_replicated' = 'Beta'),
+         title = "Table 2: Size (SMB) Replication")
+
+# --- Table 3: Value Factor (HML) ---
+hml_model <- lm(hml ~ hml_replicated, data = test_data)
+msummary(hml_model, 
+         fmt = ac_format$fmt, stars = ac_format$stars, gof_map = ac_format$gof_map,
+         coef_map = c('(Intercept)' = 'Alpha', 'hml_replicated' = 'Beta'),
+         title = "Table 3: Value (HML) Replication")
+
+# --- Table 4: Profitability Factor (RMW) ---
+rmw_model <- lm(rmw ~ rmw_replicated, data = test_data)
+msummary(rmw_model, 
+         fmt = ac_format$fmt, stars = ac_format$stars, gof_map = ac_format$gof_map,
+         coef_map = c('(Intercept)' = 'Alpha', 'rmw_replicated' = 'Beta'),
+         title = "Table 4: Profitability (RMW) Replication")
+
+# --- Table 5: Investment Factor (CMA) ---
+cma_model <- lm(cma ~ cma_replicated, data = test_data)
+msummary(cma_model, 
+         fmt = ac_format$fmt, stars = ac_format$stars, gof_map = ac_format$gof_map,
+         coef_map = c('(Intercept)' = 'Alpha', 'cma_replicated' = 'Beta'),
+         title = "Table 5: Investment (CMA) Replication")
+
+# --- Table 6: Momentum Factor (MOM) ---
+mom_model <- lm(mom ~ mom_replicated, data = test_data)
+msummary(mom_model, 
+         fmt = ac_format$fmt, stars = ac_format$stars, gof_map = ac_format$gof_map,
+         coef_map = c('(Intercept)' = 'Alpha', 'mom_replicated' = 'Beta'),
+         title = "Table 6: Momentum (MOM) Replication")
+
+
+
+
+
+
+
+
+# ==============================================================================
+# VISUALIZATION: CUMULATIVE RETURNS (Replicated vs. Official)
+# ==============================================================================
+
+# 1. Setup & Data Loading ------------------------------------------------------
+library(tidyverse)
+library(RSQLite)
+library(scales) 
+
+# Connect to DB
+tidy_finance <- dbConnect(SQLite(), "data/tidy_finance_r.sqlite", extended_types = TRUE)
+
+message("Loading Data for Plotting...")
+
+# Load Official FF5 (Rename immediately to avoid confusion)
+factors_ff5_monthly <- tbl(tidy_finance, "factors_ff5_monthly") |>
+  select(date, smb, hml, rmw, cma, mkt_excess) |>
+  collect() |> 
+  mutate(date = ymd(date)) |>
+  rename_with(~paste0(., "_Off"), -date) # Force "_Off" suffix on all factor cols
+
+# Load Official Momentum
+factors_mom_monthly <- tbl(tidy_finance, "factors_mom_monthly") |>
+  collect() |> 
+  mutate(date = ymd(date)) |>
+  rename(mom_Off = mom)
+
+# Load Replicated Factors
+factors_replicated_full <- tbl(tidy_finance, "factors_replicated_full") |> 
+  collect() |> mutate(date = ymd(date))
+
+mom_replicated <- tbl(tidy_finance, "mom_replicated") |> 
+  collect() |> mutate(date = ymd(date))
+
+# 2. Prepare Data for Plotting -------------------------------------------------
+
+# Combine datasets
+plot_data <- factors_ff5_monthly |>
+  inner_join(factors_replicated_full, join_by(date)) |>
+  left_join(factors_mom_monthly, join_by(date)) |>
+  inner_join(mom_replicated, join_by(date)) |>
+  select(date, 
+         # Select and Rename to standard "Factor_Source" format
+         mkt_excess_Off, mkt_excess_Rep = mkt_excess_replicated,
+         smb_Off,        smb_Rep        = smb_replicated,
+         hml_Off,        hml_Rep        = hml_replicated,
+         rmw_Off,        rmw_Rep        = rmw_replicated,
+         cma_Off,        cma_Rep        = cma_replicated,
+         mom_Off,        mom_Rep        = mom_replicated) |>
+  pivot_longer(cols = -date, names_to = "key", values_to = "ret") |>
+  # Parse the key into Factor and Source
+  mutate(
+    # Split "Factor_Source" string
+    factor = str_remove(key, "(_Off|_Rep)$"), 
+    source = if_else(str_detect(key, "_Off"), "Official", "Replicated"),
+    
+    # Pretty names for Plotting
+    factor = case_when(
+      factor == "mkt_excess" ~ "Mkt-RF",
+      factor == "smb" ~ "SMB",
+      factor == "hml" ~ "HML",
+      factor == "rmw" ~ "RMW",
+      factor == "cma" ~ "CMA",
+      factor == "mom" ~ "MOM",
+      TRUE ~ factor
+    )
+  ) |>
+  arrange(factor, source, date) |>
+  group_by(factor, source) |>
+  mutate(cum_ret = cumprod(1 + ret) - 1) |> # Calculate Cumulative Return
+  ungroup()
+
+# 3. Generate Plot -------------------------------------------------------------
+p <- ggplot(plot_data, aes(x = date, y = cum_ret, color = source, linetype = source)) +
+  geom_line(linewidth = 0.8) +
+  facet_wrap(~factor, scales = "free_y", ncol = 3) +
+  scale_y_continuous(labels = percent_format()) +
+  scale_color_manual(values = c("Official" = "black", "Replicated" = "#E03C31")) + 
+  scale_linetype_manual(values = c("Official" = "solid", "Replicated" = "dashed")) +
+  labs(
+    title = "Factor Replication Quality: Cumulative Returns",
+    subtitle = "Comparing Replicated Factors (Red) against Official Fama-French Benchmark (Black)",
+    x = NULL,
+    y = "Cumulative Return",
+    color = "Source",
+    linetype = "Source"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 11),
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+print(p)
+
 # Cleanup
 dbDisconnect(tidy_finance)
-message("Script Complete.")
