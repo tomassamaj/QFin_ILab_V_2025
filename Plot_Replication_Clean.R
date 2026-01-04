@@ -3529,3 +3529,100 @@ print(
       plot.subtitle = element_text(hjust = 0.5)
     )
 )
+
+
+# --- 0. Setup and Parameters ---
+# Ensure these objects exist from your previous runs:
+# - final_merged_renamed
+# - renamed_factor_cols
+
+# Parameter: Momentum Lookback (Matches your 1M/1M strategy)
+LOOKBACK_M <- 1 
+
+# --- 1. Calculate Signals and Positions ---
+factor_positions <- final_merged_renamed %>%
+  select(date, all_of(renamed_factor_cols)) %>%
+  arrange(date) %>%
+  # 1. Calculate Signal (Cumulative Log Return)
+  mutate(across(all_of(renamed_factor_cols), 
+                ~ rollapply(log(1 + .), width = LOOKBACK_M, FUN = sum, fill = NA, align = "right"),
+                .names = "{.col}")) %>%
+  na.omit() %>%
+  pivot_longer(-date, names_to = "Factor", values_to = "Signal") %>%
+  group_by(date) %>%
+  # 2. Determine Position (Median Split)
+  mutate(
+    Median_Sig = median(Signal),
+    Position = ifelse(Signal > Median_Sig, "Long", "Short")
+  ) %>%
+  ungroup()
+
+# --- 2. Aggregate Frequencies ---
+position_stats <- factor_positions %>%
+  group_by(Factor) %>%
+  summarise(
+    Total_Months = n(),
+    Long_Months = sum(Position == "Long"),
+    Short_Months = sum(Position == "Short"),
+    Pct_Long = Long_Months / Total_Months,
+    Pct_Short = Short_Months / Total_Months
+  ) %>%
+  arrange(desc(Pct_Long))
+print("--- Factor Position Frequencies ---")
+print(position_stats)
+
+# --- 3. Visualization: "Usually Long" vs "Usually Short" ---
+
+# A. Bar Chart of Long Frequency
+plot_freq <- ggplot(position_stats, aes(x = reorder(Factor, Pct_Long), y = Pct_Long, fill = Pct_Long)) +
+  geom_col() +
+  # Add reference line at 50% (Neutral)
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black") +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  # Color scale: Red (Usually Short) to Blue (Usually Long)
+  scale_fill_gradient2(low = "darkred", mid = "gray90", high = "darkblue", midpoint = 0.5) +
+  coord_flip() + # Flip to make factor names readable
+  labs(
+    title = "Factor 'Habits': Which Factors are Usually Long?",
+    subtitle = paste0("Percentage of time in the Top 50% (Momentum Lookback: ", LOOKBACK_M, " Month)"),
+    x = NULL,
+    y = "Frequency of Long Position",
+    fill = "% Long"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "none",
+    panel.grid.major.y = element_blank()
+  )
+
+print(plot_freq)
+
+# --- 4. Visualization: Position Heatmap Over Time ---
+# This helps you see if a factor changed character (e.g., became 'Short' permanently after 2000)
+
+# Sort factors by their overall "Long-ness" for the y-axis
+factor_order <- position_stats$Factor
+
+plot_heatmap <- ggplot(factor_positions, aes(x = date, y = factor(Factor, levels = factor_order), fill = Position)) +
+  geom_tile() +
+  scale_fill_manual(values = c("Long" = "blue", "Short" = "red")) +
+  labs(
+    title = "Factor Positions Over Time",
+    subtitle = "Blue = Long (Top 50%), Red = Short (Bottom 50%)",
+    x = "Year", y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 7),
+    panel.grid = element_blank()
+  )
+
+print(plot_heatmap)
+
+# --- 5. Print Top/Bottom Tables ---
+
+print("--- Top 5 'Perma-Long' Factors ---")
+print(head(position_stats %>% select(Factor, Pct_Long), 5))
+
+print("--- Top 5 'Perma-Short' Factors ---")
+print(tail(position_stats %>% select(Factor, Pct_Long), 5))
