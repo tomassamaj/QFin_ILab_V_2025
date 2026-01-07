@@ -149,7 +149,7 @@ print("--- Replicated Gross Profitability (PMU) Stats ---")
 print(stats)
 print("Note: Returns reflect CIZ tape (Daily Reinvestment) as per Schwarz et al. (2025)")
 
-dbDisconnect(tidy_finance)
+
 
 
 
@@ -168,7 +168,7 @@ replicated_factor <- tbl(tidy_finance, "factor_gross_profitability") |>
   select(date, ret_replicated = pmu_replicated)
 
 # B. Load Benchmark CSV (Already End-of-Month)
-benchmark_factor <- read_csv("[usa]_[gp_at]_[monthly]_[vw_cap].csv") |>
+benchmark_factor <- read_csv("benchmark_data/[usa]_[gp_at]_[monthly]_[vw_cap].csv") |>
   mutate(date = ymd(date)) |>
   select(date, ret_benchmark = ret)
 

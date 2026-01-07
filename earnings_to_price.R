@@ -125,7 +125,7 @@ replicated_factor <- tbl(tidy_finance, "factor_earnings_price") |>
   select(date, ret_replicated = ni_me_replicated)
 
 # B. Load Benchmark CSV
-benchmark_factor <- read_csv("[usa]_[ni_me]_[monthly]_[vw_cap].csv") |>
+benchmark_factor <- read_csv("benchmark_data/[usa]_[ni_me]_[monthly]_[vw_cap].csv") |>
   mutate(date = ymd(date)) |>
   select(date, ret_benchmark = ret)
 

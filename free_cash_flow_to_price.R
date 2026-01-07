@@ -139,7 +139,7 @@ replicated_factor <- fcf_factor |>
   select(date, ret_replicated = fcf_me_replicated)
 
 # Load Uploaded Benchmark (FCF_ME)
-benchmark_factor <- read_csv("[usa]_[fcf_me]_[monthly]_[vw_cap].csv") |>
+benchmark_factor <- read_csv("benchmark_data/[usa]_[fcf_me]_[monthly]_[vw_cap].csv") |>
   mutate(date = ymd(date)) |>
   select(date, ret_benchmark = ret)
 
