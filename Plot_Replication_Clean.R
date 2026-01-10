@@ -3597,6 +3597,7 @@ plot_freq <- ggplot(position_stats, aes(x = reorder(Factor, Pct_Long), y = Pct_L
 
 print(plot_freq)
 
+
 # --- 4. Visualization: Position Heatmap Over Time ---
 # This helps you see if a factor changed character (e.g., became 'Short' permanently after 2000)
 
@@ -3626,3 +3627,197 @@ print(head(position_stats %>% select(Factor, Pct_Long), 5))
 
 print("--- Top 5 'Perma-Short' Factors ---")
 print(tail(position_stats %>% select(Factor, Pct_Long), 5))
+
+################### 25% - 25% ####################
+# --- 0. Setup and Parameters ---
+# Ensure 'final_merged_renamed' and 'renamed_factor_cols' exist
+LOOKBACK_M <- 1 
+
+# --- 1. Calculate Signals and Positions (Quartile Split: 25/75) ---
+factor_positions_quartile <- final_merged_renamed %>%
+  select(date, all_of(renamed_factor_cols)) %>%
+  arrange(date) %>%
+  # 1. Calculate Signal (Cumulative Log Return)
+  mutate(across(all_of(renamed_factor_cols), 
+                ~ rollapply(log(1 + .), width = LOOKBACK_M, FUN = sum, fill = NA, align = "right"),
+                .names = "{.col}")) %>%
+  na.omit() %>%
+  pivot_longer(-date, names_to = "Factor", values_to = "Signal") %>%
+  group_by(date) %>%
+  # 2. Determine Position (Top 25% vs Bottom 25%)
+  mutate(
+    # Calculate 25th and 75th percentiles for this specific date
+    Q25 = quantile(Signal, probs = 0.25, na.rm = TRUE),
+    Q75 = quantile(Signal, probs = 0.75, na.rm = TRUE),
+    
+    # Assign Position
+    Position = case_when(
+      Signal > Q75 ~ "Long",     # Top 25%
+      Signal < Q25 ~ "Short",    # Bottom 25%
+      TRUE         ~ "Neutral"   # Middle 50%
+    )
+  ) %>%
+  ungroup()
+
+# --- 2. Aggregate Frequencies ---
+position_stats_quartile <- factor_positions_quartile %>%
+  group_by(Factor) %>%
+  summarise(
+    Total_Months = n(),
+    Long_Months  = sum(Position == "Long"),
+    Short_Months = sum(Position == "Short"),
+    Neut_Months  = sum(Position == "Neutral"),
+    
+    Pct_Long  = Long_Months / Total_Months,
+    Pct_Short = Short_Months / Total_Months,
+    Pct_Neut  = Neut_Months / Total_Months
+  ) %>%
+  # Sort by most frequently Long
+  arrange(desc(Pct_Long))
+
+print("--- Factor Position Frequencies (Top 25% vs Bottom 25%) ---")
+print(head(position_stats_quartile, 10))
+
+# --- 3. Visualization: Bar Chart of "Usually Long" ---
+plot_freq_quartile <- ggplot(position_stats_quartile, aes(x = reorder(Factor, Pct_Long), y = Pct_Long, fill = Pct_Long)) +
+  geom_col() +
+  # Add reference line at 25% (Random Chance for Long)
+  geom_hline(yintercept = 0.25, linetype = "dashed", color = "black") +
+  
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  # Color scale: Dark Blue for high freq long, fading to gray/white
+  scale_fill_gradient(low = "gray80", high = "darkblue") +
+  
+  coord_flip() + 
+  labs(
+    title = "Factor 'Habits': Which Factors are Usually Long?",
+    subtitle = paste0("Percentage of time in the Top 25% (Momentum Lookback: ", LOOKBACK_M, " Month)"),
+    x = NULL,
+    y = "Frequency of Long Position",
+    fill = "% Long"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "none",
+    panel.grid.major.y = element_blank()
+  )
+
+print(plot_freq_quartile)
+
+# --- 4. Visualization: Position Heatmap Over Time (Grey Neutrals) ---
+
+# Sort factors by their overall "Long-ness" for the y-axis
+factor_order_quartile <- position_stats_quartile$Factor
+
+plot_heatmap_quartile <- ggplot(factor_positions_quartile, 
+                                aes(x = date, y = factor(Factor, levels = factor_order_quartile), fill = Position)) +
+  geom_tile() +
+  # *** COLOR MAPPING ***
+  # Long = Blue, Short = Red, Neutral (Middle 50%) = Grey
+  scale_fill_manual(values = c(
+    "Long"    = "blue", 
+    "Short"   = "red", 
+    "Neutral" = "gray90" 
+  )) +
+  labs(
+    title = "Factor Positions Over Time (Quartile Split)",
+    subtitle = "Blue = Top 25% (Long), Red = Bottom 25% (Short), Grey = Middle 50% (Unselected)",
+    x = "Year", y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 7),
+    panel.grid = element_blank(),
+    legend.position = "top"
+  )
+
+print(plot_heatmap_quartile)
+
+# --- 5. Print Top/Bottom Tables ---
+
+print("--- Top 5 'Perma-Long' Factors (Top 25%) ---")
+print(head(position_stats_quartile %>% select(Factor, Pct_Long, Pct_Short), 5))
+
+print("--- Top 5 'Perma-Short' Factors (Bottom 25%) ---")
+# Sort by Short Percentage for this view
+print(head(position_stats_quartile %>% arrange(desc(Pct_Short)) %>% select(Factor, Pct_Long, Pct_Short), 5))
+
+
+########### Long leg crisis diversifier 
+# --- 11b. Drawdown and Crisis Analysis (Long-Leg Only) ---
+print("--- 11b. Running Drawdown & Crisis Analysis for Long-Leg Only ---")
+
+# 1. Get Market Data (Mkt-RF)
+# (Reloading ensures we have the object if it was cleared, using your exact previous logic)
+if (!exists("mkt_data")) {
+  options(timeout = 300)
+  ff_factors_raw <- download_french_data("Fama/French 3 Factors")
+  mkt_data <- ff_factors_raw$subsets$data[[1]] |>
+    mutate(
+      date = floor_date(ymd(str_c(date, "01")), "month"),
+      across(c("Mkt-RF", "RF"), ~ as.numeric(.) / 100),
+      .keep = "none"
+    ) |>
+    rename(mkt_excess = `Mkt-RF`) |>
+    filter(date >= start_date & date <= end_date) |>
+    mutate(date = ceiling_date(date, "month") - days(1))
+}
+
+# 2. Define Crisis Periods (Exact match to previous analysis)
+crisis_gfc <- interval(ymd("2007-10-01"), ymd("2009-03-31"))
+crisis_covid <- interval(ymd("2020-02-01"), ymd("2020-03-31"))
+
+# 3. Combine Long-Leg Data and Market Data
+# We select 'long_return' from the base strategy dataframe
+analysis_data_long <- base_factor_mom %>%
+  select(date, long_leg_mom = long_return) %>%
+  inner_join(mkt_data, by = "date")
+
+# 4. Calculate Performance and Correlation during Crises
+crisis_performance_long <- analysis_data_long %>%
+  mutate(
+    period = case_when(
+      date %within% crisis_gfc ~ "GFC (2007-09)",
+      date %within% crisis_covid ~ "COVID (2020)",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  filter(period != "Other") %>%
+  group_by(period) %>%
+  summarise(
+    # Cumulative Returns
+    Long_Leg_Return = prod(1 + long_leg_mom) - 1,
+    Market_Return = prod(1 + mkt_excess) - 1,
+    
+    # Crisis Diversification Metrics
+    # Correlation during the specific crisis period
+    Correlation = cor(long_leg_mom, mkt_excess),
+    
+    # Volatility during the specific crisis period (annualized)
+    Long_Leg_Vol = sd(long_leg_mom) * sqrt(12),
+    Market_Vol = sd(mkt_excess) * sqrt(12)
+  )
+
+print("Performance & Correlation of Long-Only Leg during Crisis Periods:")
+print(crisis_performance_long)
+
+# 5. Visual Check: GFC Trajectory (Long Leg vs Market)
+gfc_plot_data <- analysis_data_long %>%
+  filter(date %within% crisis_gfc) %>%
+  pivot_longer(cols = c(long_leg_mom, mkt_excess), names_to = "Strategy", values_to = "Return") %>%
+  group_by(Strategy) %>%
+  mutate(Cumulative_Wealth = cumprod(1 + Return)) %>%
+  ungroup()
+
+print(
+  ggplot(gfc_plot_data, aes(x = date, y = Cumulative_Wealth, color = Strategy)) +
+    geom_line(linewidth = 1.2) +
+    scale_color_manual(values = c("long_leg_mom" = "darkgreen", "mkt_excess" = "red")) +
+    labs(
+      title = "GFC Crisis Trajectory: Long-Leg Factor Mom vs Market", 
+      subtitle = "Cumulative Performance (Oct 2007 - Mar 2009)",
+      y = "Value of $1 Invested",
+      x = NULL
+    ) +
+    theme_minimal()
+)
