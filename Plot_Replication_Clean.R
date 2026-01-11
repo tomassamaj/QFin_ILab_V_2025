@@ -3742,7 +3742,6 @@ print("--- Top 5 'Perma-Short' Factors (Bottom 25%) ---")
 # Sort by Short Percentage for this view
 print(head(position_stats_quartile %>% arrange(desc(Pct_Short)) %>% select(Factor, Pct_Long, Pct_Short), 5))
 
-# --- 6. Visualization: Heatmap of Long Positions Only ---
 
 # --- 6. Visualization: Heatmap Long vs Non-Traded ---
 
@@ -3853,3 +3852,37 @@ print(
     ) +
     theme_minimal()
 )
+
+# --- 11c. Visual Check: COVID Trajectory (Extended View with Lines) ---
+
+# 1. Define window (Full year 2020 for context)
+covid_viz_window <- interval(ymd("2020-01-01"), ymd("2020-12-31"))
+
+# 2. Prepare Data
+covid_plot_data <- analysis_data_long %>%
+  filter(date %within% covid_viz_window) %>%
+  pivot_longer(cols = c(long_leg_mom, mkt_excess), names_to = "Strategy", values_to = "Return") %>%
+  group_by(Strategy) %>%
+  mutate(Cumulative_Wealth = cumprod(1 + Return)) %>%
+  ungroup()
+
+# 3. Generate Plot with Vertical Lines
+plot_covid_long <- ggplot(covid_plot_data, aes(x = date, y = Cumulative_Wealth, color = Strategy)) +
+  
+  # --- Add Vertical Dashed Lines (1 Feb & 31 Mar) ---
+  geom_vline(xintercept = as.numeric(ymd(c("2020-02-28", "2020-03-31"))), 
+             linetype = "dashed", 
+             color = "gray60") +
+  
+  # Plot the Strategy Lines
+  geom_line(linewidth = 1.2) +
+  
+  scale_color_manual(values = c("long_leg_mom" = "darkgreen", "mkt_excess" = "red")) +
+  labs(
+    title = "COVID 2020 Trajectory: Long-Leg Factor Mom vs Market", 
+    y = "Value of $1 Invested",
+    x = NULL
+  ) +
+  theme_minimal()
+
+print(plot_covid_long)
