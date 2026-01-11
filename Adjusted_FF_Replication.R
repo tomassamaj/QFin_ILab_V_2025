@@ -4,7 +4,7 @@
 # Description:
 #   1. Downloads public benchmark data (FF, Macro, CPI).
 #   2. Queries WRDS and collects raw data to R memory immediately.
-#   3. Corrects for Delisting Bias and Accounting Shifts.
+#   3. Corrects for Delisting Bias, Accounting Shifts, and "Intersection Fallacy".
 #   4. Removes FRED Risk-Free dependency to ensure full 1960-2024 plots.
 # ==============================================================================
 
@@ -249,8 +249,11 @@ compustat_processed <- compustat_raw |>
     year = year(datadate),
     # Forensic: FASB 109 rule
     txditc_adj = if_else(year >= 1993, 0, coalesce(txditc, txdb + itcb, 0)),
+    
+    # Forensic: Book Equity (Set to NA if negative)
     be = coalesce(seq, ceq + pstk, at - lt) + txditc_adj - coalesce(pstkrv, pstkl, pstk, 0),
     be = if_else(be <= 0, NA, be),
+    
     # Forensic: 2018 MIB Profitability Revision
     denom_op = if_else(year >= 2018, be + coalesce(mib, 0), be),
     op = (sale - coalesce(cogs, 0) - coalesce(xsga, 0) - coalesce(xint, 0)) / denom_op
@@ -265,6 +268,8 @@ compustat_processed <- compustat_raw |>
       select(gvkey, year, at_lag), 
     join_by(gvkey, year)
   ) |>
+  # CMA FIX: Ensure strictly positive assets to avoid Infinite growth or weird zeros
+  filter(at > 0 & at_lag > 0) |> 
   mutate(inv = at / at_lag - 1)
 
 dbWriteTable(tidy_finance, "compustat", compustat_processed, overwrite = TRUE)
@@ -286,85 +291,119 @@ dbWriteTable(tidy_finance, "crsp_monthly", crsp_monthly_linked, overwrite = TRUE
 dbDisconnect(wrds)
 
 # ==============================================================================
-# PHASE 3: FACTOR REPLICATION
+# PHASE 3: FACTOR REPLICATION (INDEPENDENT SORTS)
 # ==============================================================================
-message("Replicating Factors...")
+message("Replicating Factors (Independent Sorts)...")
 
+# 1. Prepare Sorting Data
 size <- crsp_monthly_linked |> filter(month(date) == 6) |>
   mutate(sorting_date = date %m+% months(1)) |> select(permno, exchange, sorting_date, size = mktcap)
 
 market_equity <- crsp_monthly_linked |> filter(month(date) == 12) |>
   mutate(sorting_date = ymd(str_c(year(date) + 1, "0701"))) |> select(permno, gvkey, sorting_date, me = mktcap)
 
+# Combine, but DO NOT drop_na all at once. Keep variables sparse.
 sorting_variables <- compustat_processed |>
   mutate(sorting_date = ymd(str_c(year(datadate) + 1, "0701"))) |>
   inner_join(market_equity, by = c("gvkey", "sorting_date")) |>
   mutate(bm = be / me) |>
-  inner_join(size, by = c("permno", "sorting_date")) |>
-  drop_na(size, bm, op, inv)
+  inner_join(size, by = c("permno", "sorting_date")) 
+# Note: No global drop_na() here!
 
 assign_portfolio <- function(data, var, p) {
-  breaks <- data |> filter(exchange == "NYSE") |> pull(!!sym(var)) |>
-    quantile(probs = c(0, p, 1), na.rm = TRUE, names = FALSE)
+  # Calculate breakpoints ONLY on NYSE stocks that have valid data for 'var'
+  valid_nyse <- data |> filter(exchange == "NYSE" & !is.na(!!sym(var)))
+  breaks <- quantile(valid_nyse[[var]], probs = c(0, p, 1), na.rm = TRUE, names = FALSE)
   findInterval(data[[var]], breaks, all.inside = TRUE)
 }
 
-portfolios <- sorting_variables |>
+# 2. HML Construction (Universe: Valid Size & BM)
+portfolios_hml <- sorting_variables |>
+  filter(!is.na(size) & !is.na(bm)) |> # Independent Filter
   group_by(sorting_date) |>
-  mutate(portfolio_size = assign_portfolio(pick(everything()), "size", 0.5)) |>
-  group_by(sorting_date, portfolio_size) |>
   mutate(
-    portfolio_bm = assign_portfolio(pick(everything()), "bm", c(0.3, 0.7)),
-    portfolio_op = assign_portfolio(pick(everything()), "op", c(0.3, 0.7)),
-    portfolio_inv = assign_portfolio(pick(everything()), "inv", c(0.3, 0.7))
-  ) |> ungroup()
+    portfolio_size = assign_portfolio(pick(everything()), "size", 0.5),
+    portfolio_bm   = assign_portfolio(pick(everything()), "bm", c(0.3, 0.7))
+  ) |> ungroup() |>
+  select(permno, sorting_date, hml_port_size = portfolio_size, hml_port_bm = portfolio_bm)
 
+# 3. RMW Construction (Universe: Valid Size & OP)
+portfolios_rmw <- sorting_variables |>
+  filter(!is.na(size) & !is.na(op)) |> # Independent Filter
+  group_by(sorting_date) |>
+  mutate(
+    portfolio_size = assign_portfolio(pick(everything()), "size", 0.5),
+    portfolio_op   = assign_portfolio(pick(everything()), "op", c(0.3, 0.7))
+  ) |> ungroup() |>
+  select(permno, sorting_date, rmw_port_size = portfolio_size, rmw_port_op = portfolio_op)
+
+# 4. CMA Construction (Universe: Valid Size & Inv) - NO BM CHECK HERE!
+portfolios_cma <- sorting_variables |>
+  filter(!is.na(size) & !is.na(inv)) |> # Independent Filter
+  group_by(sorting_date) |>
+  mutate(
+    portfolio_size = assign_portfolio(pick(everything()), "size", 0.5),
+    portfolio_inv  = assign_portfolio(pick(everything()), "inv", c(0.3, 0.7))
+  ) |> ungroup() |>
+  select(permno, sorting_date, cma_port_size = portfolio_size, cma_port_inv = portfolio_inv)
+
+# 5. Merge and Calculate Returns
 factors_replicated <- crsp_monthly_linked |>
   mutate(sorting_date = if_else(month(date) <= 6, ymd(str_c(year(date)-1, "0701")), ymd(str_c(year(date), "0701")))) |>
-  inner_join(portfolios |> select(permno, sorting_date, contains("portfolio")), by = c("permno", "sorting_date")) |>
+  # Join Independent Portfolios
+  inner_join(portfolios_hml, by = c("permno", "sorting_date")) |>
+  left_join(portfolios_rmw, by = c("permno", "sorting_date")) |> # Left join to allow missing OP
+  left_join(portfolios_cma, by = c("permno", "sorting_date")) |> # Left join to allow missing Inv
   group_by(date) |>
   summarize(
-    hml_rep = mean(c(weighted.mean(ret_excess[portfolio_size==1 & portfolio_bm==3], mktcap_lag[portfolio_size==1 & portfolio_bm==3]),
-                     weighted.mean(ret_excess[portfolio_size==2 & portfolio_bm==3], mktcap_lag[portfolio_size==2 & portfolio_bm==3]))) -
-      mean(c(weighted.mean(ret_excess[portfolio_size==1 & portfolio_bm==1], mktcap_lag[portfolio_size==1 & portfolio_bm==1]),
-             weighted.mean(ret_excess[portfolio_size==2 & portfolio_bm==1], mktcap_lag[portfolio_size==2 & portfolio_bm==1]))),
-    rmw_rep = mean(c(weighted.mean(ret_excess[portfolio_size==1 & portfolio_op==3], mktcap_lag[portfolio_size==1 & portfolio_op==3]),
-                     weighted.mean(ret_excess[portfolio_size==2 & portfolio_op==3], mktcap_lag[portfolio_size==2 & portfolio_op==3]))) -
-      mean(c(weighted.mean(ret_excess[portfolio_size==1 & portfolio_op==1], mktcap_lag[portfolio_size==1 & portfolio_op==1]),
-             weighted.mean(ret_excess[portfolio_size==2 & portfolio_op==1], mktcap_lag[portfolio_size==2 & portfolio_op==1]))),
-    cma_rep = mean(c(weighted.mean(ret_excess[portfolio_size==1 & portfolio_inv==1], mktcap_lag[portfolio_size==1 & portfolio_inv==1]),
-                     weighted.mean(ret_excess[portfolio_size==2 & portfolio_inv==1], mktcap_lag[portfolio_size==2 & portfolio_inv==1]))) -
-      mean(c(weighted.mean(ret_excess[portfolio_size==1 & portfolio_inv==3], mktcap_lag[portfolio_size==1 & portfolio_inv==3]),
-             weighted.mean(ret_excess[portfolio_size==2 & portfolio_inv==3], mktcap_lag[portfolio_size==2 & portfolio_inv==3]))),
-    smb_rep = ( (weighted.mean(ret_excess[portfolio_size==1 & portfolio_bm==1], mktcap_lag[portfolio_size==1 & portfolio_bm==1]) +
-                   weighted.mean(ret_excess[portfolio_size==1 & portfolio_bm==2], mktcap_lag[portfolio_size==1 & portfolio_bm==2]) +
-                   weighted.mean(ret_excess[portfolio_size==1 & portfolio_bm==3], mktcap_lag[portfolio_size==1 & portfolio_bm==3])) / 3 +
-                  (weighted.mean(ret_excess[portfolio_size==1 & portfolio_op==1], mktcap_lag[portfolio_size==1 & portfolio_op==1]) +
-                     weighted.mean(ret_excess[portfolio_size==1 & portfolio_op==2], mktcap_lag[portfolio_size==1 & portfolio_op==2]) +
-                     weighted.mean(ret_excess[portfolio_size==1 & portfolio_op==3], mktcap_lag[portfolio_size==1 & portfolio_op==3])) / 3 +
-                  (weighted.mean(ret_excess[portfolio_size==1 & portfolio_inv==1], mktcap_lag[portfolio_size==1 & portfolio_inv==1]) +
-                     weighted.mean(ret_excess[portfolio_size==1 & portfolio_inv==2], mktcap_lag[portfolio_size==1 & portfolio_inv==2]) +
-                     weighted.mean(ret_excess[portfolio_size==1 & portfolio_inv==3], mktcap_lag[portfolio_size==1 & portfolio_inv==3])) / 3 ) / 3 -
-      ( (weighted.mean(ret_excess[portfolio_size==2 & portfolio_bm==1], mktcap_lag[portfolio_size==2 & portfolio_bm==1]) +
-           weighted.mean(ret_excess[portfolio_size==2 & portfolio_bm==2], mktcap_lag[portfolio_size==2 & portfolio_bm==2]) +
-           weighted.mean(ret_excess[portfolio_size==2 & portfolio_bm==3], mktcap_lag[portfolio_size==2 & portfolio_bm==3])) / 3 +
-          (weighted.mean(ret_excess[portfolio_size==2 & portfolio_op==1], mktcap_lag[portfolio_size==2 & portfolio_op==1]) +
-             weighted.mean(ret_excess[portfolio_size==2 & portfolio_op==2], mktcap_lag[portfolio_size==2 & portfolio_op==2]) +
-             weighted.mean(ret_excess[portfolio_size==2 & portfolio_op==3], mktcap_lag[portfolio_size==2 & portfolio_op==3])) / 3 +
-          (weighted.mean(ret_excess[portfolio_size==2 & portfolio_inv==1], mktcap_lag[portfolio_size==2 & portfolio_inv==1]) +
-             weighted.mean(ret_excess[portfolio_size==2 & portfolio_inv==2], mktcap_lag[portfolio_size==2 & portfolio_inv==2]) +
-             weighted.mean(ret_excess[portfolio_size==2 & portfolio_inv==3], mktcap_lag[portfolio_size==2 & portfolio_inv==3])) / 3 ) / 3
+    # HML: Uses hml_port_...
+    hml_rep = mean(c(weighted.mean(ret_excess[hml_port_size==1 & hml_port_bm==3], mktcap_lag[hml_port_size==1 & hml_port_bm==3], na.rm=TRUE),
+                     weighted.mean(ret_excess[hml_port_size==2 & hml_port_bm==3], mktcap_lag[hml_port_size==2 & hml_port_bm==3], na.rm=TRUE))) -
+      mean(c(weighted.mean(ret_excess[hml_port_size==1 & hml_port_bm==1], mktcap_lag[hml_port_size==1 & hml_port_bm==1], na.rm=TRUE),
+             weighted.mean(ret_excess[hml_port_size==2 & hml_port_bm==1], mktcap_lag[hml_port_size==2 & hml_port_bm==1], na.rm=TRUE))),
+    
+    # RMW: Uses rmw_port_...
+    rmw_rep = mean(c(weighted.mean(ret_excess[rmw_port_size==1 & rmw_port_op==3], mktcap_lag[rmw_port_size==1 & rmw_port_op==3], na.rm=TRUE),
+                     weighted.mean(ret_excess[rmw_port_size==2 & rmw_port_op==3], mktcap_lag[rmw_port_size==2 & rmw_port_op==3], na.rm=TRUE))) -
+      mean(c(weighted.mean(ret_excess[rmw_port_size==1 & rmw_port_op==1], mktcap_lag[rmw_port_size==1 & rmw_port_op==1], na.rm=TRUE),
+             weighted.mean(ret_excess[rmw_port_size==2 & rmw_port_op==1], mktcap_lag[rmw_port_size==2 & rmw_port_op==1], na.rm=TRUE))),
+    
+    # CMA: Uses cma_port_...
+    cma_rep = mean(c(weighted.mean(ret_excess[cma_port_size==1 & cma_port_inv==1], mktcap_lag[cma_port_size==1 & cma_port_inv==1], na.rm=TRUE),
+                     weighted.mean(ret_excess[cma_port_size==2 & cma_port_inv==1], mktcap_lag[cma_port_size==2 & cma_port_inv==1], na.rm=TRUE))) -
+      mean(c(weighted.mean(ret_excess[cma_port_size==1 & cma_port_inv==3], mktcap_lag[cma_port_size==1 & cma_port_inv==3], na.rm=TRUE),
+             weighted.mean(ret_excess[cma_port_size==2 & cma_port_inv==3], mktcap_lag[cma_port_size==2 & cma_port_inv==3], na.rm=TRUE))),
+    
+    # SMB: Average of the 3 independent sorts
+    smb_rep = (
+      # SMB from HML Sort
+      (mean(c(weighted.mean(ret_excess[hml_port_size==1 & hml_port_bm==1], mktcap_lag[hml_port_size==1 & hml_port_bm==1], na.rm=TRUE),
+              weighted.mean(ret_excess[hml_port_size==1 & hml_port_bm==2], mktcap_lag[hml_port_size==1 & hml_port_bm==2], na.rm=TRUE),
+              weighted.mean(ret_excess[hml_port_size==1 & hml_port_bm==3], mktcap_lag[hml_port_size==1 & hml_port_bm==3], na.rm=TRUE))) -
+         mean(c(weighted.mean(ret_excess[hml_port_size==2 & hml_port_bm==1], mktcap_lag[hml_port_size==2 & hml_port_bm==1], na.rm=TRUE),
+                weighted.mean(ret_excess[hml_port_size==2 & hml_port_bm==2], mktcap_lag[hml_port_size==2 & hml_port_bm==2], na.rm=TRUE),
+                weighted.mean(ret_excess[hml_port_size==2 & hml_port_bm==3], mktcap_lag[hml_port_size==2 & hml_port_bm==3], na.rm=TRUE)))) +
+        # SMB from RMW Sort
+        (mean(c(weighted.mean(ret_excess[rmw_port_size==1 & rmw_port_op==1], mktcap_lag[rmw_port_size==1 & rmw_port_op==1], na.rm=TRUE),
+                weighted.mean(ret_excess[rmw_port_size==1 & rmw_port_op==2], mktcap_lag[rmw_port_size==1 & rmw_port_op==2], na.rm=TRUE),
+                weighted.mean(ret_excess[rmw_port_size==1 & rmw_port_op==3], mktcap_lag[rmw_port_size==1 & rmw_port_op==3], na.rm=TRUE))) -
+           mean(c(weighted.mean(ret_excess[rmw_port_size==2 & rmw_port_op==1], mktcap_lag[rmw_port_size==2 & rmw_port_op==1], na.rm=TRUE),
+                  weighted.mean(ret_excess[rmw_port_size==2 & rmw_port_op==2], mktcap_lag[rmw_port_size==2 & rmw_port_op==2], na.rm=TRUE),
+                  weighted.mean(ret_excess[rmw_port_size==2 & rmw_port_op==3], mktcap_lag[rmw_port_size==2 & rmw_port_op==3], na.rm=TRUE)))) +
+        # SMB from CMA Sort
+        (mean(c(weighted.mean(ret_excess[cma_port_size==1 & cma_port_inv==1], mktcap_lag[cma_port_size==1 & cma_port_inv==1], na.rm=TRUE),
+                weighted.mean(ret_excess[cma_port_size==1 & cma_port_inv==2], mktcap_lag[cma_port_size==1 & cma_port_inv==2], na.rm=TRUE),
+                weighted.mean(ret_excess[cma_port_size==1 & cma_port_inv==3], mktcap_lag[cma_port_size==1 & cma_port_inv==3], na.rm=TRUE))) -
+           mean(c(weighted.mean(ret_excess[cma_port_size==2 & cma_port_inv==1], mktcap_lag[cma_port_size==2 & cma_port_inv==1], na.rm=TRUE),
+                  weighted.mean(ret_excess[cma_port_size==2 & cma_port_inv==2], mktcap_lag[cma_port_size==2 & cma_port_inv==2], na.rm=TRUE),
+                  weighted.mean(ret_excess[cma_port_size==2 & cma_port_inv==3], mktcap_lag[cma_port_size==2 & cma_port_inv==3], na.rm=TRUE))))
+    ) / 3
   )
 
 # ==============================================================================
 # PHASE 3.5: MARKET FACTOR REPLICATION (Without FRED RF Dependency)
 # ==============================================================================
 message("Replicating Market Factor...")
-
-# Note: We skip the FRED RF download here to prevent 'drop_na' from truncating history.
-# We already used the Official RF (from FF3 download) in Phase 2.1 to compute 'ret_excess'.
-# Therefore, 'mkt_excess_replicated' below is already correctly defined as (Mkt - Official_RF).
-
 mkt_replicated <- crsp_monthly_linked |>
   group_by(date) |>
   summarize(
@@ -434,18 +473,14 @@ dbWriteTable(tidy_finance, "mom_replicated", mom_replicated, overwrite = TRUE)
 # ==============================================================================
 message("Generating Tables...")
 
-# Load Data
 factors_ff5_monthly <- tbl(tidy_finance, "factors_ff5_monthly") |> collect() |> mutate(date = ymd(date))
 factors_mom_monthly <- tbl(tidy_finance, "factors_mom_monthly") |> collect() |> mutate(date = ymd(date))
 
-# Merge WITHOUT drop_na() first to check alignment
-# We use 'inner_join' which keeps only matching dates (1963-2024 for FF5, 1960-2024 for FF3/Mom)
 test_data <- factors_ff5_monthly |>
   inner_join(factors_replicated_full, join_by(date)) |>
   left_join(factors_mom_monthly, join_by(date)) |>
   left_join(mom_replicated, join_by(date))
 
-# Regressions
 regs <- list(
   "Mkt-RF" = lm(mkt_excess ~ mkt_excess_replicated, data = test_data),
   "SMB"    = lm(smb ~ smb_rep, data = test_data),
@@ -464,20 +499,18 @@ msummary(
 )
 
 # ==============================================================================
-# PHASE 5: VISUALIZATION (Cumulative Returns)
+# PHASE 5: VISUALIZATION
 # ==============================================================================
 message("Generating Plots...")
 
-
-# Prepare Plot Data
 plot_data <- test_data |>
   select(date, 
          mkt_excess_Off = mkt_excess, mkt_excess_Rep = mkt_excess_replicated,
-         smb_Off = smb,               smb_Rep = smb_rep,
-         hml_Off = hml,               hml_Rep = hml_rep,
-         rmw_Off = rmw,               rmw_Rep = rmw_rep,
-         cma_Off = cma,               cma_Rep = cma_rep,
-         mom_Off = mom,               mom_Rep = mom_replicated) |>
+         smb_Off = smb,                smb_Rep = smb_rep,
+         hml_Off = hml,                hml_Rep = hml_rep,
+         rmw_Off = rmw,                rmw_Rep = rmw_rep,
+         cma_Off = cma,                cma_Rep = cma_rep,
+         mom_Off = mom,                mom_Rep = mom_replicated) |>
   pivot_longer(cols = -date, names_to = "key", values_to = "ret") |>
   mutate(
     factor = str_remove(key, "(_Off|_Rep)$"), 
@@ -497,7 +530,6 @@ plot_data <- test_data |>
   mutate(cum_ret = cumprod(1 + ret) - 1) |>
   ungroup()
 
-# Generate Plot
 p <- ggplot(plot_data, aes(x = date, y = cum_ret, color = source, linetype = source)) +
   geom_line(linewidth = 0.8) +
   facet_wrap(~factor, scales = "free_y", ncol = 3) +
@@ -507,20 +539,12 @@ p <- ggplot(plot_data, aes(x = date, y = cum_ret, color = source, linetype = sou
   labs(
     title = "Factor Replication Quality: Cumulative Returns",
     subtitle = "Comparing Replicated Factors (Red) against Official Fama-French Benchmark (Black)",
-    x = NULL,
-    y = "Cumulative Return",
-    color = "Source",
-    linetype = "Source"
+    x = NULL, y = "Cumulative Return", color = "Source", linetype = "Source"
   ) +
   theme_minimal() +
-  theme(
-    legend.position = "bottom",
-    strip.text = element_text(face = "bold", size = 11),
-    plot.title = element_text(face = "bold", size = 14)
-  )
+  theme(legend.position = "bottom", strip.text = element_text(face = "bold", size = 11), plot.title = element_text(face = "bold", size = 14))
 
 print(p)
-
 
 # ==============================================================================
 # PHASE 6: VISUALIZATION (Cumulative Returns Post-2000)
