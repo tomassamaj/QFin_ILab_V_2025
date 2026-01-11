@@ -3742,6 +3742,38 @@ print("--- Top 5 'Perma-Short' Factors (Bottom 25%) ---")
 # Sort by Short Percentage for this view
 print(head(position_stats_quartile %>% arrange(desc(Pct_Short)) %>% select(Factor, Pct_Long, Pct_Short), 5))
 
+# --- 6. Visualization: Heatmap of Long Positions Only ---
+
+# --- 6. Visualization: Heatmap Long vs Non-Traded ---
+
+# Usiamo il dataset COMPLETO (senza filter)
+plot_heatmap_long_grey <- factor_positions_quartile %>%
+  ggplot(aes(x = date, y = factor(Factor, levels = factor_order_quartile), fill = Position)) +
+  geom_tile() +
+  
+  # *** MAPPATURA COLORI ***
+  # Long = Blu, tutto il resto (Short e Neutral) = Grigio chiaro
+  scale_fill_manual(values = c(
+    "Long"    = "blue", 
+    "Short"   = "gray90", 
+    "Neutral" = "gray90"
+  )) +
+  
+  labs(
+    title = "Factor Long Signals vs Others",
+    subtitle = "Blue = Long (Top 25%), Grey = Not Traded (Neutral & Short)",
+    x = "Year", 
+    y = NULL,
+    fill = "Position"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 7),
+    panel.grid = element_blank(),
+    legend.position = "top" # La legenda è ora visibile
+  )
+
+print(plot_heatmap_long_grey)
 
 ########### Long leg crisis diversifier 
 # --- 11b. Drawdown and Crisis Analysis (Long-Leg Only) ---
