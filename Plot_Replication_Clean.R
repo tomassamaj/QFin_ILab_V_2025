@@ -3628,6 +3628,76 @@ print(head(position_stats %>% select(Factor, Pct_Long), 5))
 print("--- Top 5 'Perma-Short' Factors ---")
 print(tail(position_stats %>% select(Factor, Pct_Long), 5))
 
+# --- Prepare Data for Table ---
+
+# 1. Extract Top 5 Long (Highest % Long)
+top_long <- position_stats %>%
+  arrange(desc(Pct_Long)) %>%
+  slice_head(n = 5) %>%
+  select(Factor_Long = Factor, Pct_Long) %>%
+  mutate(Rank = row_number())
+
+# 2. Extract Top 5 Short (Highest % Short)
+top_short <- position_stats %>%
+  arrange(desc(Pct_Short)) %>%
+  slice_head(n = 5) %>%
+  select(Factor_Short = Factor, Pct_Short) %>%
+  mutate(Rank = row_number())
+
+# 3. Combine into a single dataframe for side-by-side display
+combined_stats <- left_join(top_long, top_short, by = "Rank") %>%
+  select(Rank, Factor_Long, Pct_Long, Factor_Short, Pct_Short)
+
+# --- Create GT Table ---
+summary_table <- combined_stats %>%
+  gt() %>%
+  # Add Title and Subtitle
+  tab_header(
+    title = md("**Factor Analysis**"),
+    subtitle = "Top 5 Most Frequently Long vs. Short Factors"
+  ) %>%
+  # Formatting Columns
+  fmt_percent(
+    columns = c(Pct_Long, Pct_Short),
+    decimals = 1
+  ) %>%
+  # Rename Columns for Display
+  cols_label(
+    Rank = "#",
+    Factor_Long = "Usually Long Factor",
+    Pct_Long = "% Time Long",
+    Factor_Short = "Usually Short Factor",
+    Pct_Short = "% Time Short"
+  ) %>%
+  # Add Spanner Headers to group columns
+  tab_spanner(
+    label = "Long Side Bias",
+    columns = c(Factor_Long, Pct_Long)
+  ) %>%
+  tab_spanner(
+    label = "Short Side Bias",
+    columns = c(Factor_Short, Pct_Short)
+  ) %>%
+  # Apply some styling
+  tab_style(
+    style = list(
+      cell_text(weight = "bold", color = "darkblue")
+    ),
+    locations = cells_body(columns = c(Factor_Long, Pct_Long))
+  ) %>%
+  tab_style(
+    style = list(
+      cell_text(weight = "bold", color = "darkred")
+    ),
+    locations = cells_body(columns = c(Factor_Short, Pct_Short))
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+# Print the table
+print(summary_table)
 ################### 25% - 25% ####################
 # --- 0. Setup and Parameters ---
 # Ensure 'final_merged_renamed' and 'renamed_factor_cols' exist
@@ -3773,6 +3843,107 @@ plot_heatmap_long_grey <- factor_positions_quartile %>%
   )
 
 print(plot_heatmap_long_grey)
+
+
+# --- 1. Calculate Signals and Positions (25/25 Split) ---
+factor_positions_25 <- final_merged_renamed %>%
+  select(date, all_of(renamed_factor_cols)) %>%
+  arrange(date) %>%
+  # Calculate Signal (1M Momentum)
+  mutate(across(all_of(renamed_factor_cols), 
+                ~ rollapply(log(1 + .), width = 1, FUN = sum, fill = NA, align = "right"),
+                .names = "{.col}")) %>%
+  na.omit() %>%
+  pivot_longer(-date, names_to = "Factor", values_to = "Signal") %>%
+  group_by(date) %>%
+  # Determine Position: Top 25% vs Bottom 25%
+  mutate(
+    q25 = quantile(Signal, 0.25),
+    q75 = quantile(Signal, 0.75),
+    Position = case_when(
+      Signal > q75 ~ "Long",
+      Signal < q25 ~ "Short",
+      TRUE ~ "Neutral" # Middle 50%
+    )
+  ) %>%
+  ungroup()
+
+# --- 2. Aggregate Frequencies ---
+position_stats_25 <- factor_positions_25 %>%
+  group_by(Factor) %>%
+  summarise(
+    Total_Months = n(),
+    Long_Months = sum(Position == "Long"),
+    Short_Months = sum(Position == "Short"),
+    Pct_Long = Long_Months / Total_Months,
+    Pct_Short = Short_Months / Total_Months
+  )
+
+# --- 3. Prepare Data for GT Table ---
+
+# Top 5 Factors that are most often Long
+top_long_25 <- position_stats_25 %>%
+  arrange(desc(Pct_Long)) %>%
+  slice_head(n = 5) %>%
+  select(Factor_Long = Factor, Pct_Long) %>%
+  mutate(Rank = row_number())
+
+# Top 5 Factors that are most often Short
+top_short_25 <- position_stats_25 %>%
+  arrange(desc(Pct_Short)) %>%
+  slice_head(n = 5) %>%
+  select(Factor_Short = Factor, Pct_Short) %>%
+  mutate(Rank = row_number())
+
+# Combine
+combined_stats_25 <- left_join(top_long_25, top_short_25, by = "Rank") %>%
+  select(Rank, Factor_Long, Pct_Long, Factor_Short, Pct_Short)
+
+# --- 4. Create GT Table ---
+summary_table_25 <- combined_stats_25 %>%
+  gt() %>%
+  tab_header(
+    title = md("**Factor Analysis**"),
+    subtitle = "Factors most frequently appearing in the Top or Bottom Quartiles"
+  ) %>%
+  fmt_percent(
+    columns = c(Pct_Long, Pct_Short),
+    decimals = 1
+  ) %>%
+  cols_label(
+    Rank = "#",
+    Factor_Long = "Often Top Quartile",
+    Pct_Long = "% Time Long",
+    Factor_Short = "Often Bottom Quartile",
+    Pct_Short = "% Time Short"
+  ) %>%
+  tab_spanner(
+    label = "Long Side Candidates",
+    columns = c(Factor_Long, Pct_Long)
+  ) %>%
+  tab_spanner(
+    label = "Short Side Candidates",
+    columns = c(Factor_Short, Pct_Short)
+  ) %>%
+  # Style Longs (Green/Blue)
+  tab_style(
+    style = list(cell_text(weight = "bold", color = "#2f7a33")), # Forest Green
+    locations = cells_body(columns = c(Factor_Long, Pct_Long))
+  ) %>%
+  # Style Shorts (Red)
+  tab_style(
+    style = list(cell_text(weight = "bold", color = "#b81414")), # Dark Red
+    locations = cells_body(columns = c(Factor_Short, Pct_Short))
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = everything()
+  ) %>%
+  tab_source_note(
+    source_note = "Note: Factors in the middle 50% are Neutral"
+  )
+
+print(summary_table_25)
 
 ########### Long leg crisis diversifier 
 # --- 11b. Drawdown and Crisis Analysis (Long-Leg Only) ---
