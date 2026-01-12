@@ -205,7 +205,7 @@ if(nrow(comparison_data) > 0) {
   
   p <- ggplot(plot_data, aes(x = date, y = Cumulative_Return, color = Series)) +
     geom_line(linewidth = 1) +
-    labs(title = "Validation: Replicated vs Benchmark (Fixed Date Alignment)") +
+    labs(title = "Gross Profitability Validation: Replicated vs Benchmark") +
     theme_minimal()
   print(p)
 } else {
