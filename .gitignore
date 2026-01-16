@@ -5,4 +5,4 @@
 .Renviron
 .sqlite
 data/*.sqlite
-.parquet*.parquet
+*.parquet
