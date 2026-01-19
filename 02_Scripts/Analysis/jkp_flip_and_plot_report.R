@@ -12,10 +12,10 @@ pacman::p_load(tidyverse, arrow, ggplot2, lubridate, gridExtra, grid)
 # Update this path if necessary
 setwd("/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code")
 
-BENCH_FILE <- "[usa]_[all_factors]_[monthly]_[vw_cap].csv"
-REPL_FILE  <- "pfs.parquet"
-OUTPUT_FILE <- "USA_Valid_Factor_Returns.parquet"
-PDF_REPORT  <- "Final_Audit_Report.pdf"
+BENCH_FILE <- "01_Data/Raw/[usa]_[all_factors]_[monthly]_[vw_cap].csv"
+REPL_FILE  <- "01_Data/Raw/pfs.parquet"
+OUTPUT_FILE <- "01_Data/Processed/USA_Valid_Factor_Returns.parquet"
+PDF_REPORT  <- "03_Outputs/Reports/Final_Audit_Report.pdf"
 
 # ==============================================================================
 # 1. LOAD DATA & CONSTRUCT INITIAL PORTFOLIOS

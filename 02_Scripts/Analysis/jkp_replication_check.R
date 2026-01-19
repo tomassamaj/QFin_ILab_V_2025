@@ -7,7 +7,7 @@ if (!require("pacman")) install.packages("pacman")
 pacman::p_load(tidyverse, arrow, ggplot2, lubridate, gridExtra)
 
 # CONFIG
-setwd("/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code")
+setwd("/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code/01_Data/Raw/")
 BENCH_FILE <- "[usa]_[all_factors]_[monthly]_[vw_cap].csv"
 REPL_FILE  <- "pfs.parquet"
 
@@ -77,7 +77,7 @@ cat("Factors < 0.90:", sum(factor_stats$correlation < 0.90, na.rm=T), "\n")
 
 # 4. PLOT PDF
 cat("--- Generating PDF Report ---\n")
-pdf("Corrected_Replication_Report.pdf", width = 10, height = 6)
+pdf("03_Outputs/Reports/Corrected_Replication_Report.pdf", width = 10, height = 6)
 
 for(f in factor_stats$characteristic) {
   plot_data <- audit %>% 
@@ -101,3 +101,4 @@ for(f in factor_stats$characteristic) {
 }
 dev.off()
 cat("Done!\n")
+
