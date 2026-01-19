@@ -6,3 +6,6 @@
 .sqlite
 data/*.sqlite
 *.parquet
+01_Data/
+*.rds
+*.RData
