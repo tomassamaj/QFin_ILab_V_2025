@@ -9,3 +9,4 @@ data/*.sqlite
 01_Data/
 *.rds
 *.RData
+*.csv
