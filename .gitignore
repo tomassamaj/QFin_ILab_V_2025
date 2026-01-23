@@ -9,5 +9,10 @@ data/*.sqlite
 01_Data/
 *.rds
 *.RData
+<<<<<<< HEAD
 
 .DS_Store
+=======
+*.csv
+.venv/
+>>>>>>> 512d38ea647e49035e825292d34a8b8fe79744a3
