@@ -9,3 +9,5 @@ data/*.sqlite
 01_Data/
 *.rds
 *.RData
+
+.DS_Store
