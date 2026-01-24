@@ -9,9 +9,13 @@ if (!require("pacman")) {
 pacman::p_load(tidyverse, arrow, lubridate, zoo, ggplot2, scales)
 
 # --- CONFIGURATION ---
+#setwd(
+#  "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code"
+#)
 setwd(
-  "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code"
+  "C:/WU/ILab ZZ/QFin_ILab_V_2025"
 )
+
 DAILY_PFS_FILE <- "01_Data/Raw/pfs_daily.parquet"
 OUTPUT_PLOT <- "03_Outputs/Figures/JKP_Momentum_Replication_Core.pdf"
 
