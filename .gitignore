@@ -9,7 +9,9 @@ data/*.sqlite
 01_Data/
 *.rds
 *.RData
+<<<<<<< HEAD
+
+.DS_Store
+=======
 *.csv
 .venv/
-*.DS_Store
-.DS_Store
