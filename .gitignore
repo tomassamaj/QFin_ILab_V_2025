@@ -11,3 +11,5 @@ data/*.sqlite
 *.RData
 *.csv
 .venv/
+*.DS_Store
+.DS_Store
