@@ -9,13 +9,13 @@ if (!require("pacman")) {
 pacman::p_load(tidyverse, arrow, lubridate, gridExtra, grid)
 
 # --- CONFIGURATION ---
-#setwd(
-#  "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code"
-#)
-
 setwd(
-  "C:/WU/ILab ZZ/QFin_ILab_V_2025"
+  "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code"
 )
+
+# setwd(
+#  "C:/WU/ILab ZZ/QFin_ILab_V_2025"
+# )
 
 # Inputs
 BENCH_FILE <- "01_Data/Raw/[usa]_[all_factors]_[monthly]_[vw_cap].csv"
@@ -121,13 +121,14 @@ diag_stats <- diagnostic %>%
     )
   )
 
+
 # Extract list of factors to flip
 factors_to_flip <- diag_stats %>%
   filter(action == "Flip") %>%
   pull(characteristic)
 
 cat("Found", length(factors_to_flip), "factors that need sign flipping.\n")
-
+print(factors_to_flip)
 # ==============================================================================
 # 3. CORRECTION & FILTERING PHASE
 # ==============================================================================
