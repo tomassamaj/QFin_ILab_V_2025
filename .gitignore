@@ -15,3 +15,4 @@ data/*.sqlite
 =======
 *.csv
 .venv/
+03_Outputs/.DS_Store
