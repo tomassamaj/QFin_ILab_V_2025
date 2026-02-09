@@ -9,7 +9,6 @@ if (!require("pacman")) {
 }
 pacman::p_load(
   tidyverse,
-  arrow,
   lubridate,
   ggplot2,
   gridExtra,
@@ -17,6 +16,7 @@ pacman::p_load(
   scales,
   data.table
 )
+library(arrow)
 
 # --- 1. SETUP & PATHS ---
 BASE_DIR <- "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code"
@@ -190,8 +190,7 @@ audit_stats <- audit_stats[!is.na(correlation)]
 print("--- AUDIT RESULTS ---")
 print(audit_stats[order(correlation)])
 
-
-# --- 5. GENERATE REPORT ---
+# --- 5. GENERATE REPORT (CORRECTED) ---
 cat("--- 4. Generating PDF Report ---\n")
 
 pdf(REPORT_FILE, width = 10, height = 7)
@@ -202,20 +201,18 @@ title <- paste0(
   "Bottom-Up Replication Audit\n",
   "Source: Single Stock Weights + World_Ret_Monthly\n",
   "Target: Official JKP Factor Index\n",
-  "Date: ",
-  Sys.Date()
+  "Date: ", Sys.Date()
 )
 grid.text(title, x = 0.5, y = 0.7, gp = gpar(fontsize = 18, fontface = "bold"))
 
 # Summary Table
-table_data <- audit_stats[
-  order(correlation),
-  .(
-    Factor = characteristic,
-    Corr = round(correlation, 4),
-    TE = round(tracking_error, 4)
-  )
-]
+table_data <- audit_stats[order(correlation), .(
+  Factor = characteristic,
+  Corr = round(correlation, 4),
+  TE = round(tracking_error, 4)
+)]
+
+# If list is too long, show top/bottom 25
 if (nrow(table_data) > 25) {
   table_data <- head(table_data, 25)
 }
@@ -225,52 +222,41 @@ grid.table(table_data, rows = NULL)
 factors_to_plot <- unique(comparison$characteristic)
 
 for (f in factors_to_plot) {
+  
+  # Filter and Sort by 'join_date' (the safe aligned date)
   plot_data <- comparison[characteristic == f] %>%
-    arrange(date) %>%
+    arrange(join_date) %>% 
     mutate(
       Cum_My_Ret = cumprod(1 + my_factor_ret),
       Cum_Bench = cumprod(1 + bench_ret)
     )
-
+  
   stat <- audit_stats[characteristic == f]
-
-  p <- ggplot(plot_data, aes(x = date)) +
-    geom_line(
-      aes(y = Cum_My_Ret, color = "Reconstructed (Bottom-Up)"),
-      linewidth = 1
-    ) +
-    geom_line(
-      aes(y = Cum_Bench, color = "Official Benchmark"),
-      linetype = "dashed",
-      linewidth = 0.8
-    ) +
+  
+  # Plot using 'join_date'
+  p <- ggplot(plot_data, aes(x = join_date)) +
+    geom_line(aes(y = Cum_My_Ret, color = "Reconstructed (Bottom-Up)"), linewidth = 1) +
+    geom_line(aes(y = Cum_Bench, color = "Official Benchmark"), linetype = "dashed", linewidth = 0.8) +
     scale_y_log10() +
-    scale_color_manual(
-      values = c(
-        "Reconstructed (Bottom-Up)" = "#27AE60",
-        "Official Benchmark" = "black"
-      )
-    ) +
+    scale_color_manual(values = c("Reconstructed (Bottom-Up)" = "#27AE60", "Official Benchmark" = "black")) +
     labs(
       title = paste0("Audit: ", f),
       subtitle = paste0(
-        "Correlation: ",
-        round(stat$correlation, 4),
-        " | Tracking Error: ",
-        percent(stat$tracking_error, 0.01)
+        "Correlation: ", round(stat$correlation, 4),
+        " | Tracking Error: ", percent(stat$tracking_error, 0.01)
       ),
       y = "Cumulative Wealth (Log)",
+      x = "Date", 
       color = ""
     ) +
     theme_minimal() +
     theme(legend.position = "bottom")
-
+  
   print(p)
 }
 
 dev.off()
 cat("✅ Report saved to:", REPORT_FILE, "\n")
-
 
 # ==============================================================================
 # 5. ROBUST AUTO-CORRECTION (Force Flip)
@@ -539,3 +525,186 @@ for (f in factors_to_plot) {
 dev.off()
 
 cat("✅ PDF Report generated successfully: ", PDF_OUTPUT, "\n")
+
+
+
+
+
+
+
+
+
+
+
+# ==============================================================================
+# STRATEGY: REALISTIC DAILY FACTOR MOMENTUM (PRACTITIONER'S IMPLEMENTATION)
+# ==============================================================================
+# Logic:
+# 1. Use Daily Data (pfs_daily).
+# 2. Rebalance Monthly (at Month End).
+# 3. Execution Lag: Trade at the Close of the 1st trading day of the month.
+#    (Result: We capture returns from Day 2 onwards. Day 1 is dead time/cash).
+# ==============================================================================
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, arrow, data.table, lubridate, zoo, scales, ggplot2)
+
+# --- 1. SETUP & DATA LOADING ---
+# Ensure we use the Daily Portfolio Sorts file
+DAILY_INPUT <- file.path(DATA_DIR, "pfs_daily.parquet")
+
+cat("--- 1. Loading Daily Factor Data (pfs_daily) ---\n")
+pfs_daily <- read_parquet(DAILY_INPUT) %>%
+  filter(excntry == "USA") %>%
+  select(date, characteristic, pf, ret = ret_vw_cap) %>%
+  collect()
+setDT(pfs_daily)
+
+# --- 2. CONSTRUCT DAILY FACTOR RETURNS ---
+# Logic: High Portfolio (Max PF) - Low Portfolio (Min PF)
+cat("--- 2. Constructing Daily Long-Short Factors ---\n")
+
+daily_factors <- pfs_daily[, .(
+  ret_long  = ret[pf == max(pf)],
+  ret_short = ret[pf == min(pf)]
+), by = .(date, characteristic)]
+
+# Calculate Raw Return (High - Low)
+daily_factors[, factor_ret := ret_long - ret_short]
+
+# --- 3. APPLY SIGN CORRECTIONS (CRITICAL) ---
+# We use the 'factors_to_flip' list from your Audit.
+# If that object is gone, we re-define the known flips here based on your last result.
+# (Based on your output: market_equity, ivol, beta, etc. need flipping)
+
+# Re-load the corrected weights file just to get the list of flipped factors if needed
+# Or simpler: We trust the audit we just ran.
+if (!exists("factors_to_flip")) {
+  # Fallback: List from your last printed output
+  factors_to_flip <- c("betabab_1260d", "market_equity", "beta_60m", "ivol_ff3_21d", 
+                       "age", "prc", "ret_1_0", "sale_gr1", "at_gr1", "at_be", 
+                       "ret_60_12", "chcsho_12m", "netis_at", "o_score", "capx_gr1",
+                       "oaccruals_at", "dolvol_126d", "inv_gr1", "cowc_gr1a", 
+                       "capex_abn", "dbnetis_at", "noa_at")
+}
+
+cat("Applying Sign Corrections to", length(factors_to_flip), "factors...\n")
+daily_factors[characteristic %in% factors_to_flip, factor_ret := factor_ret * -1]
+
+# --- 4. CALCULATE MONTHLY SIGNAL ---
+# We aggregate daily returns to create the monthly signal
+# This ensures the signal is exactly what you would see at Month-End.
+
+daily_factors[, month := floor_date(date, "month")]
+
+monthly_signals <- daily_factors[, .(
+  # Signal: Cumulative return over the month (1-Month Momentum)
+  mom_signal = sum(log(1 + factor_ret))
+), by = .(characteristic, month)]
+
+# --- 5. DETERMINE TARGET WEIGHTS (At Month End) ---
+cat("--- 3. Calculating Portfolio Weights (Month-End) ---\n")
+
+# Rank Cross-Sectionally
+monthly_signals[, rank := frank(mom_signal), by = month]
+monthly_signals[, n_facts := .N, by = month]
+
+# Strategy Weights (Target)
+monthly_signals[, w_quartile_lo := fifelse(rank > 0.75 * n_facts, 1 / (0.25 * n_facts), 0)]
+monthly_signals[, w_median_ls   := fifelse(rank > 0.5 * n_facts, 1/(0.5*n_facts), -1/(0.5*n_facts))]
+
+# --- 6. MERGE TO DAILY & APPLY IMPLEMENTATION LAG ---
+cat("--- 4. executing Daily Trades (With Lag) ---\n")
+
+# Shift weights forward by 1 month to align with trading period
+# (Signal Jan 31 -> Target Weight for Feb)
+monthly_targets <- monthly_signals[, .(month = month + months(1), characteristic, w_quartile_lo, w_median_ls)]
+
+# Merge Targets into Daily Data
+daily_backtest <- merge(daily_factors, monthly_targets, 
+                        by = c("month", "characteristic"), 
+                        all.x = TRUE)
+
+# Remove days with no weights (e.g. before start of strategy)
+daily_backtest <- daily_backtest[!is.na(w_quartile_lo)]
+setorder(daily_backtest, characteristic, date)
+
+# *** THE REAL WORLD IMPLEMENTATION LAG ***
+# Logic: We trade at the CLOSE of Day 1.
+# This means we DO NOT capture the return of Day 1.
+# We set the weight on the 1st day of the month to 0 (or ideally, the previous month's weight).
+# For simplicity in this script (fresh start), we set Day 1 return to 0.
+
+# Identify the first trading day of each month
+daily_backtest[, is_trade_day := date == min(date), by = month]
+
+# Apply Lag: If it's the trading day, we are "in the market executing", so no return on new positions.
+# (If we wanted to be super precise, we would hold the OLD portfolio on Day 1, but "Cash on Day 1" is a safe conservative proxy).
+daily_backtest[is_trade_day == TRUE, w_quartile_lo := 0]
+daily_backtest[is_trade_day == TRUE, w_median_ls := 0]
+
+# --- 7. CALCULATE DAILY PERFORMANCE ---
+strategy_daily <- daily_backtest[, .(
+  ret_quartile_lo = sum(w_quartile_lo * factor_ret, na.rm = TRUE),
+  ret_median_ls   = sum(w_median_ls * factor_ret, na.rm = TRUE)
+), by = date]
+
+setorder(strategy_daily, date)
+
+# Cumulative Returns
+strategy_daily[, cum_lo := cumprod(1 + ret_quartile_lo)]
+strategy_daily[, cum_ls := cumprod(1 + ret_median_ls)]
+
+# --- 8. VOLATILITY SCALING (Daily) ---
+# Hedge Funds scale based on Daily Volatility (Exponential Weighted or Rolling)
+cat("--- 5. Applying Daily Volatility Control ---\n")
+
+TARGET_VOL <- 0.10
+# Rolling 60-day volatility (approx 3 months)
+strategy_daily[, vol_lo := frollapply(ret_quartile_lo, 60, sd, fill=NA) * sqrt(252)]
+strategy_daily[, vol_ls := frollapply(ret_median_ls, 60, sd, fill=NA) * sqrt(252)]
+
+# Leverage (Lagged by 1 day)
+strategy_daily[, lev_lo := shift(pmin(2.0, TARGET_VOL / vol_lo), 1)]
+strategy_daily[, lev_ls := shift(pmin(2.0, TARGET_VOL / vol_ls), 1)]
+
+# Apply Leverage
+strategy_daily[, scaled_ret_lo := ret_quartile_lo * lev_lo]
+strategy_daily[, scaled_ret_ls := ret_median_ls * lev_ls]
+
+# Scaled Cumulative
+strategy_daily[, cum_scaled_lo := cumprod(1 + fifelse(is.na(scaled_ret_lo), 0, scaled_ret_lo))]
+strategy_daily[, cum_scaled_ls := cumprod(1 + fifelse(is.na(scaled_ret_ls), 0, scaled_ret_ls))]
+
+# --- 9. FINAL PLOT ---
+cat("--- 6. Plotting Results ---\n")
+
+plot_data <- melt(strategy_daily, id.vars = "date", 
+                  measure.vars = c("cum_lo", "cum_scaled_lo", "cum_scaled_ls"))
+
+ggplot(plot_data, aes(x = date, y = value, color = variable)) +
+  geom_line(linewidth = 0.8) +
+  scale_y_log10(labels = scales::comma) + 
+  scale_color_manual(values = c(
+    "cum_lo" = "gray", 
+    "cum_scaled_lo" = "#27AE60", 
+    "cum_scaled_ls" = "#2980B9"
+  ), labels = c("Long Only (Raw)", "Long Only (10% Vol)", "Long Short (10% Vol)")) +
+  labs(
+    title = "Realistic Factor Momentum (Daily Execution)",
+    subtitle = "1-Month Signal | Trades at T+1 Close (Day 1 Return Missed)",
+    y = "Cumulative Wealth (Log)",
+    x = "",
+    color = "Strategy"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Stats
+final_stats <- strategy_daily %>%
+  filter(!is.na(scaled_ret_lo)) %>%
+  summarise(
+    LO_Sharpe = (mean(scaled_ret_lo)*252) / (sd(scaled_ret_lo)*sqrt(252)),
+    LS_Sharpe = (mean(scaled_ret_ls)*252) / (sd(scaled_ret_ls)*sqrt(252))
+  )
+print(final_stats)

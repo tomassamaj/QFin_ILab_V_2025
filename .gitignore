@@ -16,3 +16,4 @@ data/*.sqlite
 *.csv
 .venv/
 03_Outputs/.DS_Store
+03_Outputs/Strategy
