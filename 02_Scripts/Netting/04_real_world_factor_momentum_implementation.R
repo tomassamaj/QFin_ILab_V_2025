@@ -1172,3 +1172,12 @@ ggplot(df_plot, aes(x = Date)) +
   ) +
   theme_minimal() +
   theme(legend.position = "bottom")
+
+
+weight <- read_parquet(file.path(DATA_DIR, "usa_factor_weights.parquet")) %>%
+  setDT() %>%
+  head()
+
+rets <- read_parquet(file.path(DATA_DIR, "USA_daily_rets.parquet")) %>%
+  setDT() %>%
+  head()

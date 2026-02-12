@@ -1,0 +1,390 @@
+# ==============================================================================
+# PHASE 2: SINGLE STOCK WEIGHTS ANALYSIS
+# Focus: Investability, Turnover, and Concentration
+# ==============================================================================
+
+# --- LIBRARIES ---
+if (!require("pacman")) {
+  install.packages("pacman")
+}
+pacman::p_load(arrow, tidyverse, data.table, lubridate, scales, gridExtra)
+
+# --- CONFIGURATION ---
+# UPDATE THIS PATH to where you saved the file locally
+FILE_PATH <- "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code/01_Data/Clean_Daily_Inputs/arnott_stock_weights.parquet"
+
+# --- 1. LOAD DATA ---
+cat("Loading Portfolio Weights...\n")
+dt <- read_parquet(FILE_PATH) %>% as.data.table()
+
+# Ensure date format
+dt[, eom := as.Date(eom)]
+setorder(dt, eom, id)
+
+# --- 2. SANITY CHECKS (The "Bug Hunt") ---
+cat("\n--- SANITY CHECKS ---\n")
+
+# Check 1: Gross Exposure (Should be 1.0 or 100%)
+# Logic: sum(abs(weight)) per month
+check_gross <- dt[, .(gross_exp = sum(abs(weight))), by = eom]
+cat(
+  "Avg Gross Exposure (Target 1.0): ",
+  round(mean(check_gross$gross_exp), 4),
+  "\n"
+)
+
+# Check 2: Net Exposure (Should be 0.0 for Dollar Neutral)
+# Logic: sum(weight) per month
+check_net <- dt[, .(net_exp = sum(weight)), by = eom]
+cat(
+  "Avg Net Exposure (Target 0.0):   ",
+  round(mean(check_net$net_exp), 4),
+  "\n"
+)
+
+# Check 3: Missing IDs
+n_ids <- uniqueN(dt$id)
+cat("Total Unique Stocks traded since 1963:", n_ids, "\n")
+
+
+# --- 3. CONCENTRATION ANALYSIS (Risk) ---
+# How much of the portfolio is in the Top 10 bets?
+# Ideally, this should be < 10% for a diversified factor strategy.
+
+conc_stats <- dt[,
+  .(
+    top10_share = sum(sort(abs(weight), decreasing = TRUE)[1:10]),
+    max_single_weight = max(abs(weight))
+  ),
+  by = eom
+]
+
+p1 <- ggplot(conc_stats, aes(x = eom, y = top10_share)) +
+  geom_area(fill = "#2c3e50", alpha = 0.7) +
+  geom_hline(
+    yintercept = mean(conc_stats$top10_share),
+    color = "red",
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Portfolio Concentration",
+    subtitle = "Sum of Absolute Weights of Top 10 Holdings",
+    y = "Weight %",
+    x = ""
+  ) +
+  scale_y_continuous(labels = percent) +
+  theme_minimal()
+
+
+# --- 4. TURNOVER ANALYSIS (Transaction Costs) ---
+# Calculation: Sum(|w_t - w_{t-1}|) / 2
+# We need to align t with t-1 including stocks that exited or entered (weight = 0)
+
+cat("\nCalculating Turnover (This may take a moment)...\n")
+
+# Create t-1 dataset
+dt_prev <- copy(dt)
+dt_prev[, eom := eom %m+% months(1)] # Shift date forward to match 'next' month
+setnames(dt_prev, "weight", "w_prev")
+
+# Full Join to capture entries and exits
+dt_turnover <- merge(dt, dt_prev, by = c("eom", "id"), all = TRUE)
+
+# Fill NAs with 0 (Entry or Exit)
+dt_turnover[is.na(weight), weight := 0]
+dt_turnover[is.na(w_prev), w_prev := 0]
+
+# Calculate Monthly Turnover (One-Way)
+monthly_tcost <- dt_turnover[,
+  .(
+    turnover = sum(abs(weight - w_prev)) / 2
+  ),
+  by = eom
+]
+
+avg_turnover <- mean(monthly_tcost$turnover, na.rm = TRUE)
+ann_turnover <- avg_turnover * 12
+
+cat("Average Monthly Turnover:", percent(avg_turnover), "\n")
+cat("Annualized Turnover:     ", percent(ann_turnover), "\n")
+
+p2 <- ggplot(monthly_tcost, aes(x = eom, y = turnover)) +
+  geom_col(fill = "#e74c3c") +
+  geom_hline(yintercept = avg_turnover, color = "black", size = 1) +
+  labs(
+    title = "Monthly Turnover (One-Way)",
+    subtitle = paste0("Avg Annualized: ", percent(ann_turnover)),
+    y = "Turnover %",
+    x = "Date"
+  ) +
+  scale_y_continuous(labels = percent) +
+  theme_minimal()
+
+
+# --- 5. POSITION COUNTS (Capacity) ---
+pos_counts <- dt[,
+  .(
+    Longs = sum(weight > 0),
+    Shorts = sum(weight < 0)
+  ),
+  by = eom
+] %>%
+  pivot_longer(
+    cols = c("Longs", "Shorts"),
+    names_to = "Leg",
+    values_to = "Count"
+  )
+
+p3 <- ggplot(pos_counts, aes(x = eom, y = Count, fill = Leg)) +
+  geom_area() +
+  scale_fill_manual(values = c("Longs" = "#27ae60", "Shorts" = "#c0392b")) +
+  labs(
+    title = "Number of Active Positions",
+    subtitle = "Total breadth of the strategy",
+    y = "Count",
+    x = "Date"
+  ) +
+  theme_minimal()
+
+
+# --- 6. OUTPUT ---
+grid.arrange(p1, p2, p3, ncol = 1)
+
+# Summary Table for Partners
+summary_table <- data.frame(
+  Metric = c(
+    "Annualized Turnover",
+    "Avg Top 10 Concentration",
+    "Max Single Stock Weight",
+    "Avg Positions (Long)",
+    "Avg Positions (Short)"
+  ),
+  Value = c(
+    percent(ann_turnover),
+    percent(mean(conc_stats$top10_share)),
+    percent(max(conc_stats$max_single_weight)),
+    round(mean(pos_counts$Count[pos_counts$Leg == "Longs"])),
+    round(mean(pos_counts$Count[pos_counts$Leg == "Shorts"]))
+  )
+)
+
+print(summary_table)
+
+
+# ==============================================================================
+# PHASE 2: LOCAL BACKTEST MASTER SCRIPT
+# Input: arnott_master.parquet (Weights + Returns + Day1)
+# ==============================================================================
+
+if (!require("pacman")) {
+  install.packages("pacman")
+}
+pacman::p_load(
+  arrow,
+  tidyverse,
+  data.table,
+  lubridate,
+  PerformanceAnalytics,
+  scales
+)
+
+# --- 1. CONFIGURATION ---
+MASTER_FILE <- "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code/01_Data/Clean_Daily_Inputs/arnott_master.parquet" # Update this path!
+
+# --- 2. LOAD MASTER FILE ---
+dt <- read_parquet(MASTER_FILE) %>% as.data.table()
+dt[, eom := as.Date(eom)]
+
+# --- 3. CALCULATE PORTFOLIO RETURNS ---
+# A. Standard (Trade at Month End Close)
+# B. Lagged (Trade at Next Day Close) -> Approx: Monthly - Day1
+
+perf_ts <- dt[,
+  .(
+    # Standard: Sum(Weight * Monthly_Ret)
+    ret_standard = sum(weight * ret_exc_lead1m, na.rm = TRUE),
+
+    # Lagged: Sum(Weight * (Monthly_Ret - Day1_Ret))
+    # Logic: We missed the Day 1 return, so we subtract it from the monthly total.
+    ret_lagged = sum(weight * (ret_exc_lead1m - ret_day1), na.rm = TRUE),
+
+    # Turnover: Need lag calculation (see below)
+    gross_exp = sum(abs(weight))
+  ),
+  by = eom
+][order(eom)]
+
+# --- 4. TURNOVER CALCULATION ---
+# Shift weights to align t and t-1
+w_curr <- dt[, .(eom, id, w_t = weight)]
+w_prev <- dt[, .(eom = eom %m+% months(1), id, w_prev = weight)]
+
+turnover_dt <- merge(w_curr, w_prev, by = c("eom", "id"), all = TRUE)
+turnover_dt[is.na(w_t), w_t := 0]
+turnover_dt[is.na(w_prev), w_prev := 0]
+
+t_cost_ts <- turnover_dt[,
+  .(
+    turnover = sum(abs(w_t - w_prev)) / 2
+  ),
+  by = eom
+]
+
+# Merge into performance time series
+perf_ts <- merge(perf_ts, t_cost_ts, by = "eom")
+
+# --- 5. REPORTING ---
+# Convert to xts for Analytics
+xts_ret <- xts(perf_ts[, .(ret_standard, ret_lagged)], order.by = perf_ts$eom)
+
+cat("\n=== STRATEGY PERFORMANCE (1963-Present) ===\n")
+table.AnnualizedReturns(xts_ret)
+maxDrawdown(xts_ret)
+
+cat("\n=== IMPLEMENTATION REALITY ===\n")
+cat("Avg Annualized Turnover: ", percent(mean(perf_ts$turnover) * 12), "\n")
+cat(
+  "Avg Gross Exposure:      ",
+  round(mean(perf_ts$gross_exp), 2),
+  "(Target: 1.0)\n"
+)
+
+# --- 6. PLOTTING ---
+charts.PerformanceSummary(
+  xts_ret,
+  main = "Arnott Factor Momentum: Standard vs. Lagged",
+  colorset = c("black", "red")
+)
+
+
+# ==============================================================================
+# PHASE 2: DEEP DIVE INTO WEIGHT BEHAVIOR
+# "Forensics" - Why is turnover 600%? Do we have "Whale" positions?
+# ==============================================================================
+
+if (!require("pacman")) {
+  install.packages("pacman")
+}
+pacman::p_load(
+  arrow,
+  tidyverse,
+  data.table,
+  lubridate,
+  scales,
+  gridExtra,
+  viridis
+)
+
+# --- CONFIGURATION ---
+# Use the MASTER file if you have it, or the weights file
+
+# --- 1. LOAD & PREP ---
+cat("Loading Data...\n")
+dt <- read_parquet(FILE_PATH) %>% as.data.table()
+dt[, eom := as.Date(eom)]
+
+# --- 2. THE "NETTING EFFICIENCY" CHECK ---
+# This is a sophisticated metric.
+# We are summing many factor bets. Do they cancel out (noise) or reinforce (signal)?
+# Netting Ratio = |Sum(Weights)| / Sum(|Weights|)
+# If Ratio is near 0, factors are fighting each other. If near 1, they agree.
+
+cat("Calculating Netting Efficiency...\n")
+# Note: Since your file is already netted, we can't calculate the 'Gross' component easily
+# unless we saved the raw inputs.
+# Instead, let's look at the DISTRIBUTION of the final weights.
+
+# --- 3. WEIGHT DISTRIBUTION (Are we diversified?) ---
+# Filter for non-zero positions
+active_pos <- dt[weight != 0]
+
+p1 <- ggplot(active_pos[eom > "2020-01-01"], aes(x = weight)) +
+  geom_histogram(bins = 100, fill = "#2980b9", color = "white") +
+  theme_minimal() +
+  labs(
+    title = "Weight Distribution (Post-2020)",
+    subtitle = "Are weights Gaussian or Fat-Tailed?",
+    x = "Net Weight",
+    y = "Count"
+  ) +
+  xlim(-0.005, 0.005) # Zoom in on the center (adjust if needed)
+
+# --- 4. THE "FLICKER" TEST (Visualizing Turnover) ---
+# Pick 4 well-known stocks to see how their weight changes over time.
+# We need specific Permnos/IDs. Since we have 'id' (likely Permno),
+# let's pick the stocks with the largest Cumulative Weight (Big Caps usually).
+
+top_ids <- dt[, .(total_w = sum(abs(weight))), by = id][order(-total_w)][1:4]$id
+
+stock_trace <- dt[id %in% top_ids & eom > "2015-01-01"]
+
+p2 <- ggplot(
+  stock_trace,
+  aes(x = eom, y = weight, group = id, color = as.factor(id))
+) +
+  geom_line(linewidth = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_wrap(~id, scales = "free_y", ncol = 1) +
+  theme_minimal() +
+  labs(
+    title = "Single Stock Weight History (2015-Present)",
+    subtitle = "Visualizing the instability that drives 600% turnover",
+    y = "Weight",
+    x = "Year",
+    color = "Stock ID"
+  ) +
+  theme(legend.position = "none")
+
+# --- 5. THE "WHALE" DETECTOR ---
+# Find the absolute maximum weight ever assigned to a single stock.
+# If this is > 5% in a diversified portfolio, it's a bug or a risk.
+
+max_w <- dt[which.max(abs(weight))]
+cat("\n--- EXTREME POSITION CHECK ---\n")
+cat(
+  "Max Single Position:",
+  percent(max_w$weight),
+  "on",
+  as.character(max_w$eom),
+  "Stock ID:",
+  max_w$id,
+  "\n"
+)
+
+# Top 1% of weights
+cat("99th Percentile Weight:", percent(quantile(abs(dt$weight), 0.99)), "\n")
+
+# --- 6. HEATMAP OF TOP POSITIONS (The "Churn" View) ---
+# Look at the Top 20 stocks by weight for a specific year (e.g., 2023)
+# and see how they enter/exit the "Top 20" list.
+
+subset_yr <- dt[year(eom) == 2023]
+# Rank stocks by absolute weight each month
+subset_yr[, rank := frank(-abs(weight)), by = eom]
+# Filter for Top 20
+top_20_matrix <- subset_yr[rank <= 20]
+
+p3 <- ggplot(
+  top_20_matrix,
+  aes(x = eom, y = reorder(as.factor(id), weight), fill = weight)
+) +
+  geom_tile() +
+  scale_fill_gradient2(
+    low = "#c0392b",
+    mid = "white",
+    high = "#27ae60",
+    midpoint = 0
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Top 20 Positions Heatmap (2023)",
+    subtitle = "Green = Long, Red = Short. Choppy blocks = High Turnover.",
+    x = "Month",
+    y = "Stock ID",
+    fill = "Weight"
+  ) +
+  theme(axis.text.y = element_text(size = 6))
+
+# --- 7. OUTPUT ---
+grid.arrange(p1, p3, ncol = 1)
+print(p2) # Print trace separately as it's tall
