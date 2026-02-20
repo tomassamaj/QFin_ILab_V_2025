@@ -84,53 +84,8 @@ final_merged <- inner_join(ff_17_industry_monthly, merged_factors, by = "date")
 
 # --- 4. Rename Factors to Readable Names ---
 
-# Map of readable names to original factor names
-factor_rename_map <- c(
-  # Common factors
-  "Size_SMB" = "market_equity",
-  "Book_to_Market_HML" = "be_me",
-  "Operating_Profitability_RMW" = "ope_be",
-  "Asset_Growth_CMA" = "at_gr1",
-  "Long_Term_Reversals_LTREV" = "ret_60_12",
-  "Residual_Variance_RVAR" = "ivol_ff3_21d", # Assuming this col exists, adjust if needed
-  "Quality_Minus_Junk_QMJ" = "qmj",
-  "Low_Beta_BAB" = "betabab_1260d",
-  # Non-fundamental
-  "Amihud_Illiquidity" = "ami_126d",
-  "Firm_Age" = "age",
-  "Nominal_Price" = "prc",
-  "High_Volume_Premium" = "dolvol_126d",
-  # Profitability
-  "Gross_Profitability" = "gp_at",
-  "Return_on_Equity" = "ni_be",
-  "Return_on_Assets" = "niq_at",
-  "Profit_Margin" = "ebit_sale",
-  "Change_in_Asset_Turnover" = "at_turnover",
-  # Earnings quality
-  "Accruals_Factor" = "oaccruals_at",
-  "Net_Operating_Assets" = "noa_at",
-  "Net_Working_Capital_Changes" = "cowc_gr1a",
-  "Cash_Flow_to_Price" = "ocf_me",
-  "Earnings_to_Price" = "ni_me",
-  "Enterprise_Multiple" = "ebitda_mev",
-  "Sales_to_Price" = "sale_me",
-  # Investment and growth
-  "Growth_in_Inventory" = "inv_gr1",
-  "Sales_Growth" = "sale_gr1",
-  "Growth_in_Sales_Inventory" = "dsale_dinv",
-  "Abnormal_Investment" = "capex_abn",
-  "CAPX_Growth_Rate" = "capx_gr1",
-  # Financing
-  "Debt_Issuance_Factor" = "dbnetis_at",
-  "Leverage_Factor" = "at_be",
-  "One_Year_Share_Issuance" = "chcsho_12m",
-  "Total_External_Financing" = "netis_at",
-  # Distress
-  "Ohlson_O_Score" = "o_score",
-  "Altman_Z_Score" = "z_score",
-  # Composite
-  "Piotroski_F_Score" = "f_score"
-)
+# Load shared factor rename map (JKP internal names -> readable display names)
+source("02_Scripts/Utils/factor_rename_map.R")
 
 # Apply renaming to the merged dataset
 # Use any_of() to avoid errors if a factor in the map isn't in the data
@@ -346,79 +301,7 @@ if (ncol(factor_data_for_corr) >= 2) {
   )
 }
 
-# --- 6. Function to Calculate 1-Month Momentum Returns ---
-calculate_momentum <- function(df, target_cols, strategy_name) {
-  if (length(target_cols) < 2) {
-    warning(paste(
-      "Skipping momentum for",
-      strategy_name,
-      "- less than 2 columns provided."
-    ))
-    return(NULL) # Return NULL if not enough columns
-  }
-  # Check if target columns exist
-  target_cols_exist <- intersect(target_cols, colnames(df))
-  if (length(target_cols_exist) < 2) {
-    warning(paste(
-      "Skipping momentum for",
-      strategy_name,
-      "- less than 2 valid columns found in dataframe."
-    ))
-    return(NULL) # Return NULL if not enough valid columns
-  }
-
-  momentum_df <- df %>%
-    select(date, all_of(target_cols_exist)) %>%
-    arrange(date) %>%
-    mutate(across(all_of(target_cols_exist), lag, .names = "{.col}_lag1")) %>%
-    filter(row_number() > 1) %>% # Remove first row with NAs
-    rowwise() %>%
-    mutate(
-      median_lag1_ret = median(c_across(ends_with("_lag1")), na.rm = TRUE)
-    ) %>%
-    ungroup() %>%
-    mutate(across(
-      ends_with("_lag1"),
-      ~ case_when(
-        !is.na(.) & . > median_lag1_ret ~ 1,
-        !is.na(.) & . <= median_lag1_ret ~ -1,
-        TRUE ~ 0 # Handle NAs in lagged returns
-      ),
-      .names = "{sub('_lag1', '_pos', .col)}"
-    )) %>%
-    rowwise() %>%
-    mutate(
-      n_long = sum(c_across(ends_with("_pos")) == 1),
-      n_short = sum(c_across(ends_with("_pos")) == -1)
-    ) %>%
-    ungroup() %>%
-    # Calculate weights based on positions (use sign() for simplicity here matching long +1/N, short -1/N)
-    mutate(across(
-      ends_with("_pos"),
-      ~ case_when(
-        . == 1 & n_long > 0 ~ 1 / n_long,
-        . == -1 & n_short > 0 ~ -1 / n_short, # Weight magnitude AND sign
-        TRUE ~ 0
-      ),
-      .names = "{sub('_pos', '_wgt', .col)}"
-    )) %>%
-    rowwise() %>%
-    mutate(
-      # Calculate return: Sum of (Weight * Current Return)
-      momentum_return = sum(
-        c_across(ends_with("_wgt")) * # Weight includes sign here
-          c_across(all_of(target_cols_exist)), # Current month returns
-        na.rm = TRUE
-      )
-    ) %>%
-    ungroup() %>%
-    select(date, momentum_return) %>%
-    mutate(strategy_type = strategy_name)
-
-  return(momentum_df)
-}
-
-# --- 7. Calculate Raw Industry and Factor Momentum ---
+# --- 7b. Calculate Raw Industry and Factor Momentum (for volatility scaling) ---
 industry_momentum_raw <- calculate_momentum(
   final_merged_renamed,
   industry_cols,
@@ -482,7 +365,7 @@ scale_volatility <- function(
   return(df)
 }
 
-# --- 9. Apply Volatility Scaling ---
+# --- 9b. Apply Volatility Scaling ---
 target_vol <- 0.10 # 10% annualized target volatility
 lookback <- 36 # 36-month lookback
 
@@ -566,7 +449,7 @@ if (!is.null(industry_momentum_scaled) && !is.null(factor_momentum_scaled)) {
   )
 }
 
-# --- 1. Download Fama-French 3 Factors ---
+# --- 11a. Prepare Fama-French 3 Factors (for benchmark comparison) ---
 # Define dates matching your main data
 start_date_ff <- floor_date(min(final_merged_renamed$date), "month")
 end_date_ff <- ceiling_date(max(final_merged_renamed$date), "month") - days(1)
@@ -585,19 +468,13 @@ ff3_factors_monthly <- ff3_factors_monthly_raw$subsets$data[[1]] |>
 
 # --- 11. Compare Factor Momentum vs. Benchmarks (Equity & Bonds) ---
 
-# --- 1. Download Benchmark Data (Quantmod) ---
+# --- 11b. Download Market Benchmarks (S&P 500, IEF via Quantmod) ---
 
 # Define start date (slightly earlier to ensure monthly calculation works for start of analysis)
 q_start <- "1960-01-01"
 
 # A. Download S&P 500 (^GSPC)
-getSymbols(
-  "^GSPC",
-  src = "yahoo",
-  from = q_start,
-  to = Sys.Date(),
-  auto.assign = TRUE
-)
+GSPC <- getSymbols("^GSPC", src = "yahoo", from = q_start, to = Sys.Date(), auto.assign = FALSE)
 sp500_monthly <- monthlyReturn(Ad(GSPC), type = "log") # Log returns for consistency
 # Convert index to Date and align to End-of-Month
 sp500_df <- data.frame(
@@ -608,13 +485,7 @@ sp500_df <- data.frame(
 
 # B. Download US Treasuries (IEF)
 # Note: IEF inception is around 2002. Data before that will be NA.
-getSymbols(
-  "IEF",
-  src = "yahoo",
-  from = "2000-01-01",
-  to = Sys.Date(),
-  auto.assign = TRUE
-)
+IEF <- getSymbols("IEF", src = "yahoo", from = "2000-01-01", to = Sys.Date(), auto.assign = FALSE)
 ief_monthly <- monthlyReturn(Ad(IEF), type = "log")
 ief_df <- data.frame(
   date = index(ief_monthly),
@@ -622,7 +493,7 @@ ief_df <- data.frame(
 ) %>%
   mutate(date = ceiling_date(date, "month") - days(1))
 
-# --- 2. Merge and Align Data ---
+# --- 11c. Merge and Align Data ---
 
 # Prepare Strategy Data (Rename for plot labels)
 strat_df <- factor_momentum_raw %>%
@@ -642,7 +513,7 @@ combined_data <- strat_df %>%
   # Remove rows where return is NA (Crucial for IEF to start at 1.0 in 2002)
   filter(!is.na(Return))
 
-# --- 3. Calculate Cumulative Wealth ---
+# --- 11d. Calculate Cumulative Wealth ---
 
 plot_data <- combined_data %>%
   arrange(Strategy, date) %>%
@@ -650,7 +521,7 @@ plot_data <- combined_data %>%
   mutate(Cumulative_Wealth = cumprod(1 + Return)) %>%
   ungroup()
 
-# --- 4. Generate Plot ---
+# --- 11e. Generate Plot ---
 
 # Define colors matching the screenshot
 custom_colors <- c(
@@ -687,7 +558,7 @@ p <- ggplot(plot_data, aes(x = date, y = Cumulative_Wealth, color = Strategy)) +
 
 print(p)
 
-# --- 5. Generate Performance Table (gt) ---
+# --- 11f. Generate Performance Table ---
 
 # Get Risk Free rate from FF data for Sharpe Ratio calculation
 # If ff3_factors_monthly is not in env, assume 0 for safety, but try to use it.
@@ -741,7 +612,7 @@ gt_table <- perf_stats %>%
   )
 
 print(gt_table)
-# --- 2. Select One JKP Factor to Regress ---
+# --- 12a. Single-Factor FF3 Regression Example ---
 jkp_factor_name <- "Book_to_Market_HML" # Make sure this matches a column name
 
 reg_data <- final_merged_renamed %>%
@@ -752,11 +623,11 @@ reg_data <- final_merged_renamed %>%
   mutate(Factor_Excess = .data[[jkp_factor_name]] - RF) %>%
   na.omit() # Remove rows with NAs that might interfere
 
-# --- 3. Run the Regression ---
+# --- 12b. Run FF3 Regression ---
 # Regress the JKP Factor's Excess Return on FF3 Factors
 ff3_model <- lm(Factor_Excess ~ Mkt_RF + SMB + HML, data = reg_data)
 
-# --- 4. Display Summary ---
+# --- 12c. Display Summary ---
 print(paste("Regression Summary for JKP Factor:", jkp_factor_name, "on FF3"))
 summary(ff3_model)
 
@@ -802,15 +673,13 @@ factors_ff5_mom_monthly <- inner_join(
   by = "date"
 )
 
-# --- 3. Run Regressions for All Factors ---
+# --- 12d. Run FF3 Regressions for All Factors ---
 
 all_reg_data <- final_merged_renamed %>%
   select(date, all_of(renamed_factor_cols)) %>%
   inner_join(ff3_factors_monthly, by = "date")
 
 cat("\n\n--- Running Full-Period FF3 Regressions ---\n")
-
-# --- 3. Loop, Run Regressions, and Print Results ---
 
 # Loop through each factor name in the list
 for (factor_name in renamed_factor_cols) {
@@ -855,7 +724,7 @@ for (factor_name in renamed_factor_cols) {
 factors_ff5_mom_eom <- factors_ff5_mom_monthly %>%
   mutate(date = ceiling_date(date, "month") - days(1))
 
-# --- 3. Prepare Full Regression Data ---
+# --- 12e. Prepare Full Regression Data (FF5 + Mom) ---
 
 # Join factors with the 6-factor model data
 all_reg_data_ff5_mom <- final_merged_renamed %>%
@@ -865,7 +734,7 @@ all_reg_data_ff5_mom <- final_merged_renamed %>%
 
 cat("\n\n--- Running Full-Period FF5 + Momentum Regressions ---\n")
 
-# --- 4. Loop, Run Regressions, and Print Results ---
+# --- 12f. Loop: Run FF5+Mom Regressions for All Factors ---
 
 # Loop through each factor name in the list
 for (factor_name in renamed_factor_cols) {
@@ -1891,44 +1760,8 @@ ff_17_industry_monthly <- ff_17_industry_monthly_raw$subsets$data[[1]] |>
 final_merged <- inner_join(ff_17_industry_monthly, merged_factors, by = "date")
 
 # --- 4. Rename Factors to Readable Names ---
-factor_rename_map <- c(
-  "Size_SMB" = "market_equity",
-  "Book_to_Market_HML" = "be_me",
-  "Operating_Profitability_RMW" = "ope_be",
-  "Asset_Growth_CMA" = "at_gr1",
-  "Long_Term_Reversals_LTREV" = "ret_60_12",
-  "Residual_Variance_RVAR" = "ivol_ff3_21d",
-  "Quality_Minus_Junk_QMJ" = "qmj",
-  "Low_Beta_BAB" = "betabab_1260d",
-  "Amihud_Illiquidity" = "ami_126d",
-  "Firm_Age" = "age",
-  "Nominal_Price" = "prc",
-  "High_Volume_Premium" = "dolvol_126d",
-  "Gross_Profitability" = "gp_at",
-  "Return_on_Equity" = "ni_be",
-  "Return_on_Assets" = "niq_at",
-  "Profit_Margin" = "ebit_sale",
-  "Change_in_Asset_Turnover" = "at_turnover",
-  "Accruals_Factor" = "oaccruals_at",
-  "Net_Operating_Assets" = "noa_at",
-  "Net_Working_Capital_Changes" = "cowc_gr1a",
-  "Cash_Flow_to_Price" = "ocf_me",
-  "Earnings_to_Price" = "ni_me",
-  "Enterprise_Multiple" = "ebitda_mev",
-  "Sales_to_Price" = "sale_me",
-  "Growth_in_Inventory" = "inv_gr1",
-  "Sales_Growth" = "sale_gr1",
-  "Growth_in_Sales_Inventory" = "dsale_dinv",
-  "Abnormal_Investment" = "capex_abn",
-  "CAPX_Growth_Rate" = "capx_gr1",
-  "Debt_Issuance_Factor" = "dbnetis_at",
-  "Leverage_Factor" = "at_be",
-  "One_Year_Share_Issuance" = "chcsho_12m",
-  "Total_External_Financing" = "netis_at",
-  "Ohlson_O_Score" = "o_score",
-  "Altman_Z_Score" = "z_score",
-  "Piotroski_F_Score" = "f_score"
-)
+# Load shared factor rename map (JKP internal names -> readable display names)
+source("02_Scripts/Utils/factor_rename_map.R")
 
 final_merged_renamed <- final_merged %>%
   rename(any_of(factor_rename_map))

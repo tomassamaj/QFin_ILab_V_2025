@@ -38,7 +38,7 @@ process_factor <- function(name, table, file) {
   dbDisconnect(conn)
   
   # B. Fetch Benchmark Data
-  bench_path <- file.path("benchmark_data", file)
+  bench_path <- file.path("01_Data/Benchmark", file)
   if(!file.exists(bench_path)) return(NULL)
   
   bench_data <- read_csv(bench_path, show_col_types = FALSE) |>
