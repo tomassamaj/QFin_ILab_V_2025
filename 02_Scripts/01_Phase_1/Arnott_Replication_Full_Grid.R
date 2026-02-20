@@ -1071,7 +1071,346 @@ cat("   Saved: Arnott_AnnReturn_BarChart.pdf\n")
 
 
 # ==============================================================================
-# 13. FINAL CONSOLE SUMMARY
+# 13. FOCUSED CUMULATIVE RETURN: Market | Ind Momentum | LS_Median_1M | LO_25_1M
+# ==============================================================================
+cat("\n--- 13. Focused Cumulative Return Plot ---\n")
+
+focused_series <- list()
+
+# Market
+if (!is.null(mkt_series)) {
+  focused_series[["Market (Mkt-RF)"]] <- mkt_series %>%
+    arrange(date) %>%
+    mutate(cum_wealth = cumprod(1 + period_ret), Series = "Market (Mkt-RF)") %>%
+    select(date, cum_wealth, Series)
+}
+
+# Industry Momentum
+if (!is.null(ind_mom)) {
+  focused_series[["Industry Momentum"]] <- ind_mom %>%
+    arrange(date) %>%
+    mutate(
+      cum_wealth = cumprod(1 + period_ret),
+      Series = "Industry Momentum"
+    ) %>%
+    select(date, cum_wealth, Series)
+}
+
+# LS_Median_1M
+if ("LS_Median_1M" %in% names(all_grid_results)) {
+  focused_series[["LS Median (1M)"]] <- all_grid_results[["LS_Median_1M"]] %>%
+    arrange(date) %>%
+    mutate(cum_wealth = cumprod(1 + period_ret), Series = "LS Median (1M)") %>%
+    select(date, cum_wealth, Series)
+}
+
+# LO_25_1M
+if ("LO_25_1M" %in% names(all_grid_results)) {
+  focused_series[["LO Top-25% (1M)"]] <- all_grid_results[["LO_25_1M"]] %>%
+    arrange(date) %>%
+    mutate(cum_wealth = cumprod(1 + period_ret), Series = "LO Top-25% (1M)") %>%
+    select(date, cum_wealth, Series)
+}
+
+focused_cum <- bind_rows(focused_series)
+
+# Add start row (cum_wealth = 1)
+focused_start <- tibble(
+  date = min(focused_cum$date) - 1,
+  cum_wealth = 1.0,
+  Series = unique(focused_cum$Series)
+)
+focused_plot <- bind_rows(focused_start, focused_cum) %>% arrange(Series, date)
+
+focused_colors <- c(
+  "Market (Mkt-RF)" = "black",
+  "Industry Momentum" = "gray50",
+  "LS Median (1M)" = "#e31a1c",
+  "LO Top-25% (1M)" = "#1f78b4"
+)
+focused_linetypes <- c(
+  "Market (Mkt-RF)" = "dotted",
+  "Industry Momentum" = "dashed",
+  "LS Median (1M)" = "solid",
+  "LO Top-25% (1M)" = "solid"
+)
+
+p_focused <- ggplot(
+  focused_plot,
+  aes(x = date, y = cum_wealth, color = Series, linetype = Series)
+) +
+  geom_line(linewidth = 1) +
+  scale_y_log10(
+    labels = scales::comma_format(accuracy = 0.1),
+    breaks = c(0.5, 1, 2, 5, 10, 20, 50, 100)
+  ) +
+  scale_color_manual(values = focused_colors) +
+  scale_linetype_manual(values = focused_linetypes) +
+  labs(
+    title = "Cumulative Return: Factor Momentum vs Benchmarks",
+    subtitle = "1963\u2013 | Log Scale | Market (Mkt-RF) | Industry Momentum | LS Median 1M | LO Top-25% 1M",
+    x = NULL,
+    y = "Cumulative Wealth (Start = 1, Log Scale)",
+    color = NULL,
+    linetype = NULL,
+    caption = "Data: JKP Daily Factors & French Data Library | Excess Returns"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom",
+    legend.text = element_text(size = 11),
+    panel.grid.minor = element_blank()
+  ) +
+  guides(color = guide_legend(nrow = 1), linetype = guide_legend(nrow = 1))
+
+print(p_focused)
+ggsave(
+  file.path(OUTPUT_DIR, "Arnott_Focused_CumReturn.pdf"),
+  plot = p_focused,
+  width = 11,
+  height = 7
+)
+cat("   Saved: Arnott_Focused_CumReturn.pdf\n")
+
+
+# ==============================================================================
+# 13b. ARNOTT (2023) EXACT REPLICATION PLOT
+#      Closest match to paper Figure: LS_Median_1M vs Industry Momentum vs Market
+#      Log scale, starts at $1, minimal classic theme, paper-style colors
+# ==============================================================================
+cat("\n--- 13b. Arnott (2023) Exact Replication Plot ---\n")
+
+arnott_series <- list()
+
+if ("LS_Median_1M" %in% names(all_grid_results)) {
+  arnott_series[["Factor Momentum (LS Median, 1M)"]] <-
+    all_grid_results[["LS_Median_1M"]] %>%
+    arrange(date) %>%
+    mutate(
+      cum_wealth = cumprod(1 + period_ret),
+      Series = "Factor Momentum (LS Median, 1M)"
+    ) %>%
+    select(date, cum_wealth, Series)
+}
+
+if (!is.null(ind_mom)) {
+  arnott_series[["Industry Momentum (LS Median, 1M)"]] <-
+    ind_mom %>%
+    arrange(date) %>%
+    mutate(
+      cum_wealth = cumprod(1 + period_ret),
+      Series = "Industry Momentum (LS Median, 1M)"
+    ) %>%
+    select(date, cum_wealth, Series)
+}
+
+if (!is.null(mkt_series)) {
+  arnott_series[["Market (Mkt-RF)"]] <-
+    mkt_series %>%
+    arrange(date) %>%
+    mutate(
+      cum_wealth = cumprod(1 + period_ret),
+      Series = "Market (Mkt-RF)"
+    ) %>%
+    select(date, cum_wealth, Series)
+}
+
+arnott_cum <- bind_rows(arnott_series)
+arnott_start <- tibble(
+  date = min(arnott_cum$date) - 1,
+  cum_wealth = 1.0,
+  Series = unique(arnott_cum$Series)
+)
+arnott_plot <- bind_rows(arnott_start, arnott_cum) %>% arrange(Series, date)
+
+arnott_colors <- c(
+  "Factor Momentum (LS Median, 1M)" = "#1565C0",
+  "Industry Momentum (LS Median, 1M)" = "#E53935",
+  "Market (Mkt-RF)" = "#424242"
+)
+arnott_ltypes <- c(
+  "Factor Momentum (LS Median, 1M)" = "solid",
+  "Industry Momentum (LS Median, 1M)" = "solid",
+  "Market (Mkt-RF)" = "dashed"
+)
+arnott_lwidths <- c(
+  "Factor Momentum (LS Median, 1M)" = 1.1,
+  "Industry Momentum (LS Median, 1M)" = 1.1,
+  "Market (Mkt-RF)" = 0.8
+)
+
+p_arnott_replication <- ggplot(
+  arnott_plot,
+  aes(
+    x = date,
+    y = cum_wealth,
+    color = Series,
+    linetype = Series,
+    linewidth = Series
+  )
+) +
+  geom_line() +
+  scale_y_log10(
+    labels = scales::dollar_format(prefix = "$", accuracy = 0.1),
+    breaks = c(0.2, 0.5, 1, 2, 5, 10, 20, 50),
+    minor_breaks = NULL
+  ) +
+  scale_x_date(
+    date_breaks = "5 years",
+    date_labels = "%Y",
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_color_manual(values = arnott_colors) +
+  scale_linetype_manual(values = arnott_ltypes) +
+  scale_linewidth_manual(values = arnott_lwidths) +
+  labs(
+    title = "Factor Momentum vs. Industry Momentum vs. Market",
+    subtitle = paste0(
+      "Cumulative Wealth, $1 Invested in 1963 | Log Scale | ",
+      "LS Median, 1-Month Lookback | 1-Day Implementation Lag"
+    ),
+    x = NULL,
+    y = "Cumulative Wealth (Log Scale)",
+    color = NULL,
+    linetype = NULL,
+    linewidth = NULL,
+    caption = paste0(
+      "Replication of Arnott et al. (2023) | ",
+      "Data: JKP Daily Factors & Ken French Data Library | Excess Returns"
+    )
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray30"),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    legend.text = element_text(size = 11),
+    legend.key.width = unit(2, "cm"),
+    axis.line = element_line(color = "gray60"),
+    panel.grid.major = element_line(color = "gray90", linewidth = 0.4),
+    panel.grid.minor = element_blank()
+  ) +
+  guides(
+    color = guide_legend(nrow = 1),
+    linetype = guide_legend(nrow = 1),
+    linewidth = guide_legend(nrow = 1)
+  )
+
+print(p_arnott_replication)
+ggsave(
+  file.path(OUTPUT_DIR, "Arnott_2023_Replication.pdf"),
+  plot = p_arnott_replication,
+  width = 11,
+  height = 7
+)
+cat("   Saved: Arnott_2023_Replication.pdf\n")
+
+
+# ==============================================================================
+# 13c. ARNOTT EXACT 1-DAY LAG REPLICATION vs 2-DAY LAG vs BENCHMARKS
+# ==============================================================================
+cat("\n--- 13c. Arnott Exact 1-Day Lag Replication Plot ---\n")
+
+arnott_exact_res <- calculate_factor_momentum(
+  df = daily_factors_wide,
+  factor_cols = factor_cols,
+  lookback_days = 21,
+  holding_days = HOLDING_DAYS,
+  impl_lag = 0, # Arnott exact: signal at T, trade at T+1 (total_lag = 1)
+  strategy = "LS_Median"
+)
+
+build_cum <- function(res, label) {
+  res |>
+    arrange(date) |>
+    mutate(cum_wealth = cumprod(1 + period_ret), Series = label) |>
+    select(date, cum_wealth, Series)
+}
+
+arnott_compare <- bind_rows(
+  build_cum(arnott_exact_res, "Factor Mom \u2013 1-Day Lag (Arnott)"),
+  build_cum(
+    all_grid_results[["LS_Median_1M"]],
+    "Factor Mom \u2013 2-Day Lag (Ours)"
+  ),
+  build_cum(ind_mom, "Industry Momentum"),
+  build_cum(mkt_series, "Market (Mkt-RF)")
+)
+
+arnott_compare_start <- tibble(
+  date = min(arnott_compare$date) - 1,
+  cum_wealth = 1.0,
+  Series = unique(arnott_compare$Series)
+)
+arnott_compare_plot <- bind_rows(arnott_compare_start, arnott_compare) |>
+  arrange(Series, date)
+
+arnott_exact_colors <- c(
+  "Factor Mom \u2013 1-Day Lag (Arnott)" = "#1565C0",
+  "Factor Mom \u2013 2-Day Lag (Ours)" = "#42A5F5",
+  "Industry Momentum" = "#E53935",
+  "Market (Mkt-RF)" = "#424242"
+)
+arnott_exact_ltypes <- c(
+  "Factor Mom \u2013 1-Day Lag (Arnott)" = "solid",
+  "Factor Mom \u2013 2-Day Lag (Ours)" = "dashed",
+  "Industry Momentum" = "solid",
+  "Market (Mkt-RF)" = "dotted"
+)
+
+p_arnott_exact <- ggplot(
+  arnott_compare_plot,
+  aes(x = date, y = cum_wealth, color = Series, linetype = Series)
+) +
+  geom_line(linewidth = 1) +
+  scale_y_log10(
+    labels = scales::dollar_format(prefix = "$", accuracy = 0.1),
+    breaks = c(0.2, 0.5, 1, 2, 5, 10, 20, 50),
+    minor_breaks = NULL
+  ) +
+  scale_x_date(
+    date_breaks = "5 years",
+    date_labels = "%Y",
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_color_manual(values = arnott_exact_colors) +
+  scale_linetype_manual(values = arnott_exact_ltypes) +
+  labs(
+    title = "Factor Momentum: Arnott Exact Replication vs Our Implementation",
+    subtitle = "LS Median, 1M Lookback | Blue solid = 1-day lag (Arnott exact) | Blue dashed = 2-day lag (Ours)",
+    x = NULL,
+    y = "Cumulative Wealth (Log Scale)",
+    color = NULL,
+    linetype = NULL,
+    caption = "Replication of Arnott et al. (2023) | Data: JKP Daily Factors & Ken French | Excess Returns"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "gray30"),
+    plot.caption = element_text(size = 8, color = "gray50"),
+    legend.position = "bottom",
+    legend.text = element_text(size = 10),
+    legend.key.width = unit(1.8, "cm"),
+    panel.grid.major = element_line(color = "gray90", linewidth = 0.4),
+    panel.grid.minor = element_blank()
+  ) +
+  guides(color = guide_legend(nrow = 2), linetype = guide_legend(nrow = 2))
+
+print(p_arnott_exact)
+ggsave(
+  file.path(OUTPUT_DIR, "Arnott_2023_Exact_1DayLag.pdf"),
+  plot = p_arnott_exact,
+  width = 11,
+  height = 7
+)
+cat("   Saved: Arnott_2023_Exact_1DayLag.pdf\n")
+
+
+# ==============================================================================
+# 14. FINAL CONSOLE SUMMARY
 # ==============================================================================
 cat("\n==============================================================\n")
 cat("  RESULTS SUMMARY\n")
