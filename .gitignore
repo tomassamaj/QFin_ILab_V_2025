@@ -15,3 +15,4 @@ data/*.sqlite
 03_Outputs/.DS_Store
 03_Outputs/Strategy
 .RDataTmp
+02_Scripts/.DS_Store
