@@ -95,42 +95,46 @@ calculate_factor_momentum <- function(
   min_factors <- 4L
 
   df_signals <- df |>
-    select(date, all_of(cols_exist)) |>
-    arrange(date) |>
-    mutate(across(
-      all_of(cols_exist),
+    dplyr::select(date, dplyr::all_of(cols_exist)) |>
+    dplyr::arrange(date) |>
+    dplyr::mutate(dplyr::across(
+      dplyr::all_of(cols_exist),
       \(x) {
-        rollapply(
+        as.numeric(zoo::rollapply(
           log(1 + x),
           width = lookback_days,
           FUN = sum,
           fill = NA,
           align = "right"
-        )
+        ))
       },
       .names = "{.col}_signal"
     )) |>
-    mutate(across(ends_with("_signal"), \(x) lag(x, n = total_lag))) |>
-    mutate(across(
-      all_of(cols_exist),
+    dplyr::mutate(dplyr::across(
+      dplyr::ends_with("_signal"),
+      \(x) dplyr::lag(x, n = total_lag)
+    )) |>
+    dplyr::mutate(dplyr::across(
+      dplyr::all_of(cols_exist),
       \(x) {
-        rollapply(
+        as.numeric(zoo::rollapply(
           log(1 + x),
           width = holding_days,
           FUN = sum,
           fill = NA,
           align = "left"
-        )
+        ))
       },
       .names = "{.col}_fwd"
     ))
 
   signal_cols <- paste0(cols_exist, "_signal")
   fwd_cols <- paste0(cols_exist, "_fwd")
+
   df_valid <- df_signals |>
-    filter(
-      rowSums(!is.na(across(all_of(signal_cols)))) >= min_factors,
-      rowSums(!is.na(across(all_of(fwd_cols)))) >= min_factors
+    dplyr::filter(
+      rowSums(!is.na(dplyr::across(dplyr::all_of(signal_cols)))) >= min_factors,
+      rowSums(!is.na(dplyr::across(dplyr::all_of(fwd_cols)))) >= min_factors
     )
   if (nrow(df_valid) < 2) {
     return(NULL)
@@ -139,7 +143,7 @@ calculate_factor_momentum <- function(
   rebal_idx <- seq(1, nrow(df_valid), by = holding_days)
   df_rebal <- df_valid[rebal_idx, ]
 
-  period_rets <- map_dbl(seq_len(nrow(df_rebal)), function(i) {
+  period_rets <- purrr::map_dbl(seq_len(nrow(df_rebal)), function(i) {
     sig <- as.numeric(df_rebal[i, signal_cols])
     fwd <- as.numeric(df_rebal[i, fwd_cols])
     vi <- !is.na(sig) & !is.na(fwd)
@@ -148,8 +152,9 @@ calculate_factor_momentum <- function(
     }
     sum(compute_weights(sig[vi], strategy) * (exp(fwd[vi]) - 1), na.rm = TRUE)
   })
-  tibble(date = df_rebal$date, period_ret = period_rets) |>
-    filter(!is.na(period_ret))
+
+  tibble::tibble(date = df_rebal$date, period_ret = period_rets) |>
+    dplyr::filter(!is.na(period_ret))
 }
 
 compute_metrics <- function(period_rets, ann_factor) {
@@ -193,18 +198,19 @@ add_start_row <- function(df) {
 }
 
 compound_mkt <- function(ref_dates, mkt_df) {
-  map_dfr(seq_along(ref_dates), function(i) {
+  purrr::map_dfr(seq_along(ref_dates), function(i) {
     d_s <- if (i == 1) min(mkt_df$date) else ref_dates[i - 1]
     d_e <- ref_dates[i]
-    tibble(
-      date = d_e,
-      period_ret = prod(1 + filter(mkt_df, date > d_s & date <= d_e)$mkt_rf) - 1
-    )
+    w <- dplyr::filter(mkt_df, date > d_s & date <= d_e)
+    tibble::tibble(date = d_e, period_ret = prod(1 + w$mkt_rf) - 1)
   })
 }
 
 fmt_pct <- function(x, acc = 0.1) scales::percent(x, accuracy = acc)
 fmt_tbl <- function(m, name) {
+  if (is.null(m)) {
+    return(NULL)
+  }
   tibble(
     Strategy = name,
     N = m$N,
@@ -215,6 +221,37 @@ fmt_tbl <- function(m, name) {
     `Max DD` = fmt_pct(m$Max_DD),
     Calmar = round(m$Calmar, 2)
   )
+}
+
+# Fixed pal/lty helpers — take actual series labels present in data
+make_pal <- function(series_in_data) {
+  full_pal <- c(
+    "Market (Mkt-RF)" = "#424242",
+    "Industry Momentum" = "#E53935",
+    "LO Top-25% 1M" = "#2e7d32",
+    "LO Median 1M" = "#6a1b9a",
+    "LS 25% 1M" = "#e65100"
+  )
+  # Factor momentum gets blue regardless of lag label
+  factor_mom <- series_in_data[grepl(
+    "^Factor Momentum|^LS_|^LO_|^LS Median|Median 1M",
+    series_in_data
+  )]
+  extra <- setNames(rep("#1565C0", length(factor_mom)), factor_mom)
+  c(extra, full_pal)[series_in_data]
+}
+
+make_lty <- function(series_in_data) {
+  lty_map <- function(s) {
+    if (grepl("Market", s)) {
+      return("dotted")
+    }
+    if (grepl("Industry", s)) {
+      return("dashed")
+    }
+    return("solid")
+  }
+  setNames(sapply(series_in_data, lty_map), series_in_data)
 }
 
 theme_ql <- function(base = 13) {
@@ -272,9 +309,12 @@ daily_factors_wide <- tryCatch(
     arrow::read_parquet(
       "../01_Data/Processed/USA_Valid_Factor_Returns_Daily.parquet"
     ) |>
-      pivot_wider(names_from = characteristic, values_from = factor_ret) |>
-      arrange(date) |>
-      filter(date >= GLOBAL_START)
+      tidyr::pivot_wider(
+        names_from = characteristic,
+        values_from = factor_ret
+      ) |>
+      dplyr::arrange(date) |>
+      dplyr::filter(date >= GLOBAL_START)
   },
   error = function(e) {
     message("Parquet load failed: ", e$message)
@@ -290,21 +330,28 @@ daily_factor_cols <- if (!is.null(daily_factors_wide)) {
 
 mkt_daily_global <- tryCatch(
   {
-    download_french_data("Fama/French 3 Factors [Daily]")$subsets$data[[1]] |>
-      mutate(date = ymd(date), mkt_rf = as.numeric(`Mkt-RF`) / 100) |>
-      select(date, mkt_rf) |>
-      filter(!is.na(mkt_rf), date >= GLOBAL_START)
+    frenchdata::download_french_data(
+      "Fama/French 3 Factors [Daily]"
+    )$subsets$data[[1]] |>
+      dplyr::mutate(
+        date = lubridate::ymd(date),
+        mkt_rf = as.numeric(`Mkt-RF`) / 100
+      ) |>
+      dplyr::select(date, mkt_rf) |>
+      dplyr::filter(!is.na(mkt_rf), date >= GLOBAL_START)
   },
   error = function(e) NULL
 )
 
 ind_daily_global <- tryCatch(
   {
-    download_french_data("17 Industry Portfolios [Daily]")$subsets$data[[1]] |>
-      mutate(date = ymd(date)) |>
-      mutate(across(-date, ~ as.numeric(.) / 100)) |>
-      arrange(date) |>
-      filter(date >= GLOBAL_START)
+    frenchdata::download_french_data(
+      "17 Industry Portfolios [Daily]"
+    )$subsets$data[[1]] |>
+      dplyr::mutate(date = lubridate::ymd(date)) |>
+      dplyr::mutate(dplyr::across(-date, ~ as.numeric(.) / 100)) |>
+      dplyr::arrange(date) |>
+      dplyr::filter(date >= GLOBAL_START)
   },
   error = function(e) NULL
 )
@@ -699,7 +746,7 @@ server <- function(input, output, session) {
     )
   )
 
-  flt <- function(df, ri) df |> filter(date >= ri[1], date <= ri[2])
+  flt <- function(df, ri) dplyr::filter(df, date >= ri[1], date <= ri[2])
 
   # ── 1. ARNOTT REPLICATION ──────────────────────────────────────────────────
   arnott_res <- eventReactive(
@@ -707,7 +754,7 @@ server <- function(input, output, session) {
     {
       req(!is.null(daily_factors_wide))
       lag_val <- as.integer(input$arnott_lag)
-      withProgress("Computing Arnott replication…", value = 0.1, {
+      withProgress(message = "Computing Arnott replication…", value = 0.1, {
         fac <- calculate_factor_momentum(
           daily_factors_wide,
           daily_factor_cols,
@@ -717,7 +764,9 @@ server <- function(input, output, session) {
           "LS_Median"
         )
         incProgress(0.35)
-        ind <- if (input$arnott_show_ind && !is.null(ind_daily_global)) {
+        ind <- if (
+          isTRUE(input$arnott_show_ind) && !is.null(ind_daily_global)
+        ) {
           calculate_factor_momentum(
             ind_daily_global,
             ind_cols_global,
@@ -730,7 +779,9 @@ server <- function(input, output, session) {
           NULL
         }
         incProgress(0.35)
-        mkt <- if (input$arnott_show_mkt && !is.null(mkt_daily_global)) {
+        mkt <- if (
+          isTRUE(input$arnott_show_mkt) && !is.null(mkt_daily_global)
+        ) {
           compound_mkt(fac$date, mkt_daily_global)
         } else {
           NULL
@@ -746,11 +797,10 @@ server <- function(input, output, session) {
   arnott_cum <- reactive({
     d <- arnott_res()
     req(d)
+    # Use a simple, stable label for the factor momentum series
     ll <- if (input$arnott_lag == "0") "1-Day Lag" else "2-Day Lag"
-    rows <- list(build_cum_wealth(
-      d$fac,
-      paste0("Factor Momentum LS Median 1M (", ll, ")")
-    ))
+    fac_lbl <- paste0("Factor Momentum (", ll, ")")
+    rows <- list(build_cum_wealth(d$fac, fac_lbl))
     if (!is.null(d$ind)) {
       rows <- c(rows, list(build_cum_wealth(d$ind, "Industry Momentum")))
     }
@@ -795,22 +845,11 @@ server <- function(input, output, session) {
     } else {
       "2-Day Lag"
     }
-    pal <- c(
-      "Factor Momentum LS Median 1M (1-Day Lag)" = "#1565C0",
-      "Factor Momentum LS Median 1M (2-Day Lag)" = "#1565C0",
-      "Industry Momentum" = "#E53935",
-      "Market (Mkt-RF)" = "#424242"
-    )
-    lty <- c(
-      "Factor Momentum LS Median 1M (1-Day Lag)" = "solid",
-      "Factor Momentum LS Median 1M (2-Day Lag)" = "solid",
-      "Industry Momentum" = "solid",
-      "Market (Mkt-RF)" = "dashed"
-    )
+    ser <- unique(df$Series)
     p <- ggplot(df, aes(date, cum_wealth, color = Series, linetype = Series)) +
       geom_line(linewidth = 1.1) +
-      scale_color_manual(values = pal) +
-      scale_linetype_manual(values = lty) +
+      scale_color_manual(values = make_pal(ser)) +
+      scale_linetype_manual(values = make_lty(ser)) +
       scale_x_date(
         date_breaks = "5 years",
         date_labels = "%Y",
@@ -878,7 +917,7 @@ server <- function(input, output, session) {
       )
       sel_lbs <- as.integer(input$grid_lbs)
       lag_val <- as.integer(input$grid_lag)
-      withProgress("Running parameter grid…", value = 0, {
+      withProgress(message = "Running parameter grid…", value = 0, {
         all_res <- list()
         all_met <- list()
         step <- 1 / (length(sel_lbs) * length(input$grid_strats))
@@ -968,13 +1007,13 @@ server <- function(input, output, session) {
     cum_all <- map_dfr(names(gd$results), function(k) {
       df <- gd$results[[k]]
       df |>
-        arrange(date) |>
-        mutate(
+        dplyr::arrange(date) |>
+        dplyr::mutate(
           cum_wealth = cumprod(1 + period_ret),
           Strategy = factor(Strategy, levels = st_ord),
           Lookback = factor(Lookback, levels = lb_ord)
         ) |>
-        filter(date >= dr[1], date <= dr[2])
+        dplyr::filter(date >= dr[1], date <= dr[2])
     })
     p <- ggplot(cum_all, aes(date, cum_wealth)) +
       geom_line(color = "#1565C0", linewidth = 0.8) +
@@ -1032,7 +1071,7 @@ server <- function(input, output, session) {
     req(!is.null(daily_factors_wide), length(input$focus_series) > 0)
     lag_val <- as.integer(input$focus_lag)
     selected <- input$focus_series
-    withProgress("Building comparison…", value = 0.05, {
+    withProgress(message = "Building comparison…", value = 0.05, {
       strat_map <- list(
         ls_median = list(lbl = "LS Median 1M", st = "LS_Median"),
         lo_25 = list(lbl = "LO Top-25% 1M", st = "LO_25"),
@@ -1084,13 +1123,12 @@ server <- function(input, output, session) {
               strat_map[[s]]$st
             )
           }
-          slist[[strat_map[[s]]$lbl]] <- build_cum_wealth(
-            res,
-            strat_map[[s]]$lbl
-          )
+          slist[[strat_map[[s]]$lbl]] <-
+            build_cum_wealth(res, strat_map[[s]]$lbl)
         }
         incProgress(0.1)
       }
+      # Return raw period_ret alongside cum_wealth for clean metric computation
       bind_rows(slist)
     })
   })
@@ -1101,31 +1139,38 @@ server <- function(input, output, session) {
     df |> add_start_row() |> flt(input$focus_dates)
   })
 
+  # BUG FIX: compute metrics from period_ret, not from diff(log(cum_wealth))
+  # which breaks on the synthetic start row and single-row groups
   focus_perf <- reactive({
     df <- focus_res()
     req(nrow(df) > 0)
     dr <- input$focus_dates
     df |>
-      filter(date >= dr[1], date <= dr[2]) |>
-      group_by(Series) |>
-      arrange(date) |>
-      summarise(
-        Ann_Ret = (last(cum_wealth))^(ANN_FACTOR / n()) - 1,
-        Ann_Vol = sd(diff(log(cum_wealth))) * sqrt(ANN_FACTOR),
-        Sharpe = Ann_Ret / Ann_Vol,
-        Cum_Ret = last(cum_wealth) - 1,
-        Max_DD = {
-          cw <- cum_wealth
-          min((cw - cummax(cw)) / cummax(cw))
-        },
-        Calmar = Ann_Ret / abs(Max_DD),
+      dplyr::filter(date >= dr[1], date <= dr[2]) |>
+      dplyr::group_by(Series) |>
+      dplyr::arrange(date) |>
+      dplyr::mutate(
+        period_ret = cum_wealth / dplyr::lag(cum_wealth, default = 1) - 1
+      ) |>
+      dplyr::summarise(
+        m = list(compute_metrics(period_ret[-1], ANN_FACTOR)),
         .groups = "drop"
-      )
+      ) |>
+      dplyr::filter(!purrr::map_lgl(m, is.null)) |>
+      dplyr::mutate(
+        Ann_Ret = purrr::map_dbl(m, "Ann_Ret"),
+        Ann_Vol = purrr::map_dbl(m, "Ann_Vol"),
+        Sharpe = purrr::map_dbl(m, "Sharpe"),
+        Cum_Ret = purrr::map_dbl(m, "Cum_Ret"),
+        Max_DD = purrr::map_dbl(m, "Max_DD"),
+        Calmar = purrr::map_dbl(m, "Calmar")
+      ) |>
+      dplyr::select(-m)
   })
 
   output$foc_sharpe <- renderUI({
     p <- focus_perf()
-    req(p)
+    req(nrow(p) > 0)
     b <- p |> slice_max(Sharpe, n = 1)
     tagList(
       strong(paste0("Best Sharpe — ", b$Series)),
@@ -1135,7 +1180,7 @@ server <- function(input, output, session) {
   })
   output$foc_ret <- renderUI({
     p <- focus_perf()
-    req(p)
+    req(nrow(p) > 0)
     b <- p |> slice_max(Ann_Ret, n = 1)
     tagList(
       strong(paste0("Best Return — ", b$Series)),
@@ -1145,7 +1190,7 @@ server <- function(input, output, session) {
   })
   output$foc_dd <- renderUI({
     p <- focus_perf()
-    req(p)
+    req(nrow(p) > 0)
     b <- p |> slice_min(abs(Max_DD), n = 1)
     tagList(
       strong(paste0("Smallest DD — ", b$Series)),
@@ -1155,7 +1200,7 @@ server <- function(input, output, session) {
   })
   output$foc_calmar <- renderUI({
     p <- focus_perf()
-    req(p)
+    req(nrow(p) > 0)
     b <- p |> slice_max(Calmar, n = 1)
     tagList(
       strong(paste0("Best Calmar — ", b$Series)),
@@ -1168,26 +1213,11 @@ server <- function(input, output, session) {
     df <- focus_cum()
     req(nrow(df) > 0)
     ll <- if (input$focus_lag == "0") "1-Day Lag" else "2-Day Lag"
-    pal <- c(
-      "Market (Mkt-RF)" = "#424242",
-      "Industry Momentum" = "#E53935",
-      "LS Median 1M" = "#1565C0",
-      "LO Top-25% 1M" = "#2e7d32",
-      "LO Median 1M" = "#6a1b9a",
-      "LS 25% 1M" = "#e65100"
-    )
-    lty <- c(
-      "Market (Mkt-RF)" = "dotted",
-      "Industry Momentum" = "dashed",
-      "LS Median 1M" = "solid",
-      "LO Top-25% 1M" = "solid",
-      "LO Median 1M" = "solid",
-      "LS 25% 1M" = "solid"
-    )
+    ser <- unique(df$Series)
     p <- ggplot(df, aes(date, cum_wealth, color = Series, linetype = Series)) +
       geom_line(linewidth = 1.05) +
-      scale_color_manual(values = pal) +
-      scale_linetype_manual(values = lty) +
+      scale_color_manual(values = make_pal(ser)) +
+      scale_linetype_manual(values = make_lty(ser)) +
       scale_x_date(
         date_breaks = "5 years",
         date_labels = "%Y",
@@ -1237,7 +1267,7 @@ server <- function(input, output, session) {
       lb <- as.integer(input$exp_lookback)
       st <- input$exp_strategy
       lb_lbl <- names(LOOKBACK_LABELS)[LOOKBACK_LABELS == as.character(lb)]
-      withProgress("Computing strategy…", value = 0.1, {
+      withProgress(message = "Computing strategy…", value = 0.1, {
         fac <- calculate_factor_momentum(
           daily_factors_wide,
           daily_factor_cols,
@@ -1328,15 +1358,10 @@ server <- function(input, output, session) {
     req(nrow(df) > 0)
     d <- explorer_raw()
     ll <- if (input$exp_lag == "0") "1-Day Lag" else "2-Day Lag"
-    base_lbl <- paste0(input$exp_strategy, " (", d$lbl, ")")
-    ind_lbl <- paste0("Industry Momentum (", d$lbl, ")")
-    pal <- setNames(
-      c("#1565C0", "#E53935", "#424242"),
-      c(base_lbl, ind_lbl, "Market (Mkt-RF)")
-    )
+    ser <- unique(df$Series)
     p <- ggplot(df, aes(date, cum_wealth, color = Series)) +
       geom_line(linewidth = 1.05) +
-      scale_color_manual(values = pal[names(pal) %in% unique(df$Series)]) +
+      scale_color_manual(values = make_pal(ser)) +
       scale_x_date(
         date_breaks = "5 years",
         date_labels = "%Y",
@@ -1449,8 +1474,8 @@ server <- function(input, output, session) {
   output$corr_plot <- renderPlot({
     dr <- input$corr_dates
     fac_data <- app_data$data |>
-      filter(date >= dr[1], date <= dr[2]) |>
-      select(any_of(app_data$factor_cols)) |>
+      dplyr::filter(date >= dr[1], date <= dr[2]) |>
+      dplyr::select(dplyr::any_of(app_data$factor_cols)) |>
       na.omit()
     req(ncol(fac_data) >= 2)
     corrplot(
@@ -1460,7 +1485,7 @@ server <- function(input, output, session) {
       order = input$corr_order,
       tl.col = "black",
       tl.cex = input$corr_font,
-      col = colorRampPalette(brewer.pal(11, "BrBG"))(200),
+      col = colorRampPalette(RColorBrewer::brewer.pal(11, "BrBG"))(200),
       diag = FALSE,
       title = paste0(
         "JKP Factor Correlation Matrix (",
@@ -1493,10 +1518,10 @@ server <- function(input, output, session) {
     if (input$reg_type == "jkp") {
       req(input$reg_jkp_factor, ff_reg_factors_loaded)
       app_data$data |>
-        select(date, ret = all_of(input$reg_jkp_factor)) |>
-        inner_join(ff_reg_factors_loaded, by = "date") |>
-        mutate(dep = ret - rf) |>
-        filter(date >= dr[1], date <= dr[2]) |>
+        dplyr::select(date, ret = dplyr::all_of(input$reg_jkp_factor)) |>
+        dplyr::inner_join(ff_reg_factors_loaded, by = "date") |>
+        dplyr::mutate(dep = ret - rf) |>
+        dplyr::filter(date >= dr[1], date <= dr[2]) |>
         na.omit()
     } else {
       req(!is.null(daily_factors_wide), ff_reg_factors_loaded)
@@ -1510,10 +1535,10 @@ server <- function(input, output, session) {
       )
       req(!is.null(res))
       res |>
-        select(date, ret = period_ret) |>
-        inner_join(ff_reg_factors_loaded, by = "date") |>
-        mutate(dep = ret) |>
-        filter(date >= dr[1], date <= dr[2]) |>
+        dplyr::select(date, ret = period_ret) |>
+        dplyr::inner_join(ff_reg_factors_loaded, by = "date") |>
+        dplyr::mutate(dep = ret) |>
+        dplyr::filter(date >= dr[1], date <= dr[2]) |>
         na.omit()
     }
   })
