@@ -11,8 +11,8 @@
 #                   div12m_me, ret_exc_lead1m
 #
 # Outputs : 01_Data/Processed/Phase2/phase2_frictions_<strategy>_<lb>.parquet
-#           03_Output/Frictions/Phase2_Friction_Decomposition_<strategy>_<lb>.pdf
-#           03_Output/Frictions/Phase2_Concentration_Comparison_<strategy>_<lb>.pdf
+#           03_Outputs/Frictions/Phase2_Friction_Decomposition_<strategy>_<lb>.pdf
+#           03_Outputs/Frictions/Phase2_Concentration_Comparison_<strategy>_<lb>.pdf
 #
 # KEY METHODOLOGICAL NOTES
 # -------------------------
@@ -36,14 +36,15 @@ pacman::p_load(
 
 # --- 1. CONFIGURATION --------------------------------------------------------
 
-MASTER_FILE <- "01_Data/Processed/Phase2/phase2_master.parquet"
+MASTER_FILE      <- "01_Data/Processed/Phase2/phase2_master.parquet"
+FACTOR_RETS_FILE <- "01_Data/Processed/Phase2/phase2_factor_returns.parquet"
 OUTPUT_DIR  <- "01_Data/Processed/Phase2"
-PLOTS_DIR   <- "03_Output/Frictions"
+PLOTS_DIR   <- "03_Outputs/Frictions"
 dir.create(PLOTS_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # Strategies to analyse (change here to run others)
-FOCUS_STRATEGY <- "CS_LS_50"
-FOCUS_LOOKBACKS <- c("1M", "6M")
+FOCUS_STRATEGY  <- c("CS_LO_50", "CS_LO_25")
+FOCUS_LOOKBACKS <- c("1M", "6M", "12M")
 
 # A. Transaction Cost parameters (power-law, same as Frictions.R)
 TC_BASE_BPS  <- 5      # base cost (bps) for the largest stocks
@@ -233,6 +234,16 @@ annualised_metrics <- function(r, label = "") {
 
 # --- 3. MAIN LOOP: strategy × lookback × concentration ----------------------
 
+# Pre-load factor-level lag-adjusted returns (used for day-1 lag correction)
+# Key insight: stock_gross (no lag) ≈ factor_full_return at portfolio level.
+# factor_ret (lag-adjusted) = stock return you'd earn with 1-day implementation lag.
+# => ret_gross_lag = factor_ret_lag_adj  (the correct real-world comparable)
+fac_rets <- read_parquet(FACTOR_RETS_FILE) %>%
+  as.data.table() %>%
+  setnames("eom_signal", "eom") %>%
+  .[, eom := as.Date(eom)] %>%
+  .[, .(strategy, lookback, eom, ret_lag_adj = ret)]
+
 cat("\n======================================================================\n")
 cat("  PHASE 2 — FRICTIONS & TRADABILITY ANALYSIS\n")
 cat("======================================================================\n\n")
@@ -307,66 +318,91 @@ for (strat in FOCUS_STRATEGY) {
       ts   <- fric$perf_ts
       ds   <- fric$drag_summary
 
+      # --- 1-Day Lag correction ------------------------------------------------
+      # stock ret_gross uses ret_exc_lead1m (full-month, NO lag) — overstates
+      # real-world return by the first-day portfolio return.
+      # Lag-adjusted gross ≈ factor-level lag-adjusted return (1-day lag applied
+      # at factor level in Python: factor_ret_lag1 = full_month/day1 - 1).
+      # This equals what you earn implementing at the CLOSE of day 1 of each month.
+      fac_sub <- fac_rets[strategy == strat & lookback == lb, .(eom, ret_lag_adj)]
+      ts[fac_sub, on = "eom", ret_gross_lag := i.ret_lag_adj]
+      ts[, ret_lag_net_all := ret_gross_lag - drag_tc - drag_sc - drag_tax]
+      m_gross_lag <- annualised_metrics(ts$ret_gross_lag,  paste0(vname, "_gross_lag"))
+      m_lag_net   <- annualised_metrics(ts$ret_lag_net_all,paste0(vname, "_lag_net_all"))
+
       # Annualised metrics for each return series
       m_gross <- annualised_metrics(ts$ret_gross,  paste0(vname, "_gross"))
       m_tc    <- annualised_metrics(ts$ret_net_tc, paste0(vname, "_net_tc"))
       m_sc    <- annualised_metrics(ts$ret_net_sc, paste0(vname, "_net_sc"))
       m_all   <- annualised_metrics(ts$ret_net_all,paste0(vname, "_net_all"))
 
-      cat(sprintf("    Gross   : Ret=%+.1f%%  Vol=%.1f%%  SR=%.2f\n",
+      cat(sprintf("    Gross (no lag): Ret=%+.1f%%  Vol=%.1f%%  SR=%.2f\n",
                   100*m_gross$ann_ret, 100*m_gross$ann_vol, m_gross$sharpe))
-      cat(sprintf("    Net-TC  : Ret=%+.1f%%  (TC drag=%.2f%% pa)\n",
+      cat(sprintf("    Gross (1d lag): Ret=%+.1f%%  Vol=%.1f%%  SR=%.2f  (day1 drag=%.2f%% pa)\n",
+                  100*m_gross_lag$ann_ret, 100*m_gross_lag$ann_vol, m_gross_lag$sharpe,
+                  100*(m_gross$ann_ret - m_gross_lag$ann_ret)))
+      cat(sprintf("    Net-TC        : Ret=%+.1f%%  (TC drag=%.2f%% pa)\n",
                   100*m_tc$ann_ret, 100*ds$drag_tc_ann))
-      cat(sprintf("    Net-SC  : Ret=%+.1f%%  (SC drag=%.2f%% pa)\n",
+      cat(sprintf("    Net-SC        : Ret=%+.1f%%  (SC drag=%.2f%% pa)\n",
                   100*m_sc$ann_ret, 100*ds$drag_sc_ann))
-      cat(sprintf("    Net-All : Ret=%+.1f%%  Vol=%.1f%%  SR=%.2f  (Total drag=%.2f%% pa)\n",
+      cat(sprintf("    Net-All(no lag): Ret=%+.1f%%  Vol=%.1f%%  SR=%.2f  (Total drag=%.2f%% pa)\n",
                   100*m_all$ann_ret, 100*m_all$ann_vol, m_all$sharpe,
                   100*ds$drag_total_ann))
+      cat(sprintf("    Net-All(1d lag): Ret=%+.1f%%  Vol=%.1f%%  SR=%.2f\n",
+                  100*m_lag_net$ann_ret, 100*m_lag_net$ann_vol, m_lag_net$sharpe))
 
       # Build wealth index for plotting
       ts[, `:=`(
-        w_gross   = cumprod(1 + fifelse(is.na(ret_gross),   0, ret_gross)),
-        w_net_tc  = cumprod(1 + fifelse(is.na(ret_net_tc),  0, ret_net_tc)),
-        w_net_sc  = cumprod(1 + fifelse(is.na(ret_net_sc),  0, ret_net_sc)),
-        w_net_all = cumprod(1 + fifelse(is.na(ret_net_all), 0, ret_net_all)),
-        version   = vname
+        w_gross      = cumprod(1 + fifelse(is.na(ret_gross),      0, ret_gross)),
+        w_gross_lag  = cumprod(1 + fifelse(is.na(ret_gross_lag),  0, ret_gross_lag)),
+        w_net_tc     = cumprod(1 + fifelse(is.na(ret_net_tc),     0, ret_net_tc)),
+        w_net_sc     = cumprod(1 + fifelse(is.na(ret_net_sc),     0, ret_net_sc)),
+        w_net_all    = cumprod(1 + fifelse(is.na(ret_net_all),    0, ret_net_all)),
+        w_lag_net    = cumprod(1 + fifelse(is.na(ret_lag_net_all),0, ret_lag_net_all)),
+        version      = vname
       )]
 
       all_perf_ts[[vname]]  <- ts
       all_results[[vname]]  <- list(ts = ts, ds = ds,
                                     m_gross = m_gross, m_all = m_all,
+                                    m_gross_lag = m_gross_lag, m_lag_net = m_lag_net,
                                     pos_stats = pos_stats)
 
       version_stats[[vname]] <- data.table(
-        version      = vname,
-        avg_n_pos    = pos_stats$avg_n_pos,
-        avg_turnover = mean(ts$turnover, na.rm = TRUE),
-        ann_ret_gross= m_gross$ann_ret,
-        sharpe_gross = m_gross$sharpe,
-        drag_tc_ann  = ds$drag_tc_ann,
-        drag_sc_ann  = ds$drag_sc_ann,
-        drag_tax_ann = ds$drag_tax_ann,
-        drag_total   = ds$drag_total_ann,
-        ann_ret_net  = m_all$ann_ret,
-        sharpe_net   = m_all$sharpe,
-        max_dd_net   = m_all$max_dd
+        version          = vname,
+        avg_n_pos        = pos_stats$avg_n_pos,
+        avg_turnover     = mean(ts$turnover, na.rm = TRUE),
+        ann_ret_gross    = m_gross$ann_ret,
+        sharpe_gross     = m_gross$sharpe,
+        ann_ret_gross_lag= m_gross_lag$ann_ret,
+        sharpe_gross_lag = m_gross_lag$sharpe,
+        drag_tc_ann      = ds$drag_tc_ann,
+        drag_sc_ann      = ds$drag_sc_ann,
+        drag_tax_ann     = ds$drag_tax_ann,
+        drag_total       = ds$drag_total_ann,
+        ann_ret_net      = m_all$ann_ret,
+        sharpe_net       = m_all$sharpe,
+        ann_ret_lag_net  = m_lag_net$ann_ret,
+        sharpe_lag_net   = m_lag_net$sharpe,
+        max_dd_net       = m_all$max_dd
       )
     }
 
     # 3.4 Print summary table ----------------------------------------------------
     summary_dt <- rbindlist(version_stats)
     cat(sprintf("\n\n  === CONCENTRATION COMPARISON: %s | %s ===\n", strat, lb))
-    cat(sprintf("  %-12s %8s %8s %9s %8s %8s %8s %8s %9s %8s\n",
-                "Version","N_pos","Turnover","Ret_Gross","SR_Gross",
-                "Drag_TC","Drag_SC","Drag_Tax","Ret_Net","SR_Net"))
-    cat(sprintf("  %s\n", paste(rep("-", 100), collapse="")))
+    cat(sprintf("  %-12s %8s %9s %9s %8s %8s %8s %8s %9s %8s %9s %8s\n",
+                "Version","N_pos","Ret_NoLag","SR_NoLag","Ret_Lag","SR_Lag",
+                "Drag_TC","Drag_SC","Drag_Tax","Net_NoLag","Net_Lag","SR_LagNet"))
+    cat(sprintf("  %s\n", paste(rep("-", 120), collapse="")))
     for (i in seq_len(nrow(summary_dt))) {
       r <- summary_dt[i]
-      cat(sprintf("  %-12s %8.0f %8.2f%% %8.1f%% %8.2f %8.2f%% %8.2f%% %8.2f%% %8.1f%% %8.2f\n",
-                  r$version, r$avg_n_pos, 100*r$avg_turnover,
+      cat(sprintf("  %-12s %8.0f %8.1f%% %8.2f %8.1f%% %8.2f %8.2f%% %8.2f%% %8.2f%% %8.1f%% %8.1f%% %8.2f\n",
+                  r$version, r$avg_n_pos,
                   100*r$ann_ret_gross, r$sharpe_gross,
+                  100*r$ann_ret_gross_lag, r$sharpe_gross_lag,
                   100*r$drag_tc_ann, 100*r$drag_sc_ann, 100*r$drag_tax_ann,
-                  100*r$ann_ret_net, r$sharpe_net))
+                  100*r$ann_ret_net, 100*r$ann_ret_lag_net, r$sharpe_lag_net))
     }
 
     # 3.5 Save results parquet ---------------------------------------------------
@@ -391,29 +427,37 @@ for (strat in FOCUS_STRATEGY) {
     ts_full <- all_perf_ts[["full"]]
 
     p_decomp <- ggplot(ts_full, aes(x = eom)) +
-      geom_ribbon(aes(ymin = w_net_tc, ymax = w_gross,
+      # Day-1 lag band (gap between no-lag and lag-adjusted gross)
+      geom_ribbon(aes(ymin = w_gross_lag, ymax = w_gross,
+                      fill = "0. Day-1 Lag"), alpha = 0.45) +
+      geom_ribbon(aes(ymin = w_net_tc, ymax = w_gross_lag,
                       fill = "1. Transaction Costs"), alpha = 0.5) +
       geom_ribbon(aes(ymin = w_net_sc, ymax = w_net_tc,
                       fill = "2. Short-Sale Costs"), alpha = 0.5) +
-      geom_ribbon(aes(ymin = w_net_all, ymax = w_net_sc,
+      geom_ribbon(aes(ymin = w_lag_net, ymax = w_net_sc,
                       fill = "3. Dividend Tax"), alpha = 0.5) +
-      geom_line(aes(y = w_gross,   color = "Gross"),   linewidth = 1) +
-      geom_line(aes(y = w_net_all, color = "Net (All)"),linewidth = 1) +
+      geom_line(aes(y = w_gross,     color = "Gross (no lag)"),    linewidth = 0.8, linetype = "dashed") +
+      geom_line(aes(y = w_gross_lag, color = "Gross (1d lag)"),    linewidth = 1) +
+      geom_line(aes(y = w_lag_net,   color = "Net (lag + frict)"), linewidth = 1) +
       scale_fill_manual(
-        name   = "Friction Layers",
-        values = c("1. Transaction Costs" = "#FDBF6F",
+        name   = "Friction / Lag Layers",
+        values = c("0. Day-1 Lag"         = "#A6CEE3",
+                   "1. Transaction Costs" = "#FDBF6F",
                    "2. Short-Sale Costs"  = "#FB9A99",
                    "3. Dividend Tax"      = "#CAB2D6")
       ) +
       scale_color_manual(
         name   = "Performance",
-        values = c("Gross" = "#1F78B4", "Net (All)" = "black")
+        values = c("Gross (no lag)"    = "#1F78B4",
+                   "Gross (1d lag)"    = "#33A02C",
+                   "Net (lag + frict)" = "black")
       ) +
       scale_y_log10(labels = comma) +
       labs(
-        title    = sprintf("Friction Decomposition — %s %s (Full Portfolio)", strat, lb),
+        title    = sprintf("Full Waterfall — %s %s (Full Portfolio)", strat, lb),
         subtitle = sprintf(
-          "TC: %.2f%% pa | SC: %.2f%% pa | Div Tax: %.2f%% pa | Total: %.2f%% pa",
+          "Day-1 lag: %.2f%% pa | TC: %.2f%% pa | SC: %.2f%% pa | Div Tax: %.2f%% pa | Total frict: %.2f%% pa",
+          100 * (all_results$full$m_gross$ann_ret - all_results$full$m_gross_lag$ann_ret),
           100 * all_results$full$ds$drag_tc_ann,
           100 * all_results$full$ds$drag_sc_ann,
           100 * all_results$full$ds$drag_tax_ann,
