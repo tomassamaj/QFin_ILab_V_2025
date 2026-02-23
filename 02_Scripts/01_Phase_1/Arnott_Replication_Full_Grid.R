@@ -1,40 +1,31 @@
-p_grid <- ggplot() +
-  geom_line(
-    data = cum_all_plot,
-    aes(x = date, y = cum_wealth),
-    color = "#004697",
-    linewidth = 0.8
-  ) +
-  facet_grid(Strategy ~ Lookback, scales = "free_y") +
-  scale_y_log10(labels = scales::comma_format(accuracy = 0.01)) +
-  labs(
-    title = "Factor Momentum: Full Parameter Grid — Cumulative Wealth",
-    subtitle = paste0(
-      "JKP Daily Factors | 1963– | 1-Day Implementation Lag | ",
-      HOLDING_DAYS,
-      "-Day Rebalancing"
-    ),
-    x = NULL,
-    y = "Cumulative Wealth (Log Scale)",
-    caption = paste0(
-      "Rows: Strategy type (LS = Long-Short, LO = Long-Only; Median/33%/25% split)\n",
-      "Cols: Lookback window (1M=21d, 2M=42d, 3M=63d, 6M=126d, 12M=252d)"
-    )
-  ) +
-  # ...existing code...
-  # Benchmarks:
-  #   - Industry Momentum (Moskowitz & Grinblatt 1999): 17 FF Industries (Daily)
-  #   - Market Factor: FF3 Mkt-RF (Daily)
-  #
-  # Outputs:
-  #   - Performance table (Sharpe, Ann Ret, Ann Vol, Cum Ret, Max DD, Calmar)
-  #   - Sharpe ratio heatmap across parameter grid
-  #   - Cumulative wealth comparison plots (best variants vs benchmarks)
-  # ==============================================================================
+# ==============================================================================
+# ARNOTT (2023) FACTOR MOMENTUM: FULL PHASE 1 REPLICATION
+# Reference: Arnott, Kalesnik & Linnainmaa (2023) "Factor Momentum", RFS
+#
+# Strategy: Cross-sectional factor momentum using JKP daily factors
+#   - Signal:       Rolling log-return over lookback window
+#   - Lag:          1-day implementation lag (realistic real-world constraint)
+#   - Rebalancing:  Every 21 trading days (monthly)
+#   - Universe:     All JKP core factors (USA)
+#
+# Parameter Grid:
+#   - Split rules:    LS_Median, LS_33, LS_25, LO_Median, LO_33, LO_25
+#   - Lookback (days):21, 42, 63, 126, 252  (1m, 2m, 3m, 6m, 12m)
+#   - Holding days:   21 (fixed, monthly rebalancing)
+#
+# Benchmarks:
+#   - Industry Momentum (Moskowitz & Grinblatt 1999): 17 FF Industries (Daily)
+#   - Market Factor: FF3 Mkt-RF (Daily)
+#
+# Outputs:
+#   - Performance table (Sharpe, Ann Ret, Ann Vol, Cum Ret, Max DD, Calmar)
+#   - Sharpe ratio heatmap across parameter grid
+#   - Cumulative wealth comparison plots (best variants vs benchmarks)
+# ==============================================================================
 
-  if (!require("pacman")) {
-    install.packages("pacman")
-  }
+if (!require("pacman")) {
+  install.packages("pacman")
+}
 pacman::p_load(
   tidyverse,
   arrow,
