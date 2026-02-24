@@ -137,7 +137,7 @@ pos_counts <- dt[,
 
 p3 <- ggplot(pos_counts, aes(x = eom, y = Count, fill = Leg)) +
   geom_area() +
-  scale_fill_manual(values = c("Longs" = "#27ae60", "Shorts" = "#c0392b")) +
+  scale_fill_manual(values = c("Longs" = "#8f9ba6ff", "Shorts" = "#0B2B65")) +
   labs(
     title = "Number of Active Positions",
     subtitle = "Total breadth of the strategy",
@@ -148,7 +148,7 @@ p3 <- ggplot(pos_counts, aes(x = eom, y = Count, fill = Leg)) +
 
 
 # --- 6. OUTPUT ---
-grid.arrange(p1, p2, p3, ncol = 1)
+grid.arrange(p1, p3, ncol = 1)
 
 # Summary Table for Partners
 summary_table <- data.frame(
@@ -388,3 +388,151 @@ p3 <- ggplot(
 # --- 7. OUTPUT ---
 grid.arrange(p1, p3, ncol = 1)
 print(p2) # Print trace separately as it's tall
+
+
+# ==============================================================================
+# PHASE 2 Add-On: DAILY EXCESS MARKET DATA & CUMULATIVE RETURNS (LOG-SCALED)
+# ==============================================================================
+start_date <- ymd("1963-01-01")
+end_date <- ymd("2024-12-31")
+
+# Ensure required packages are loaded
+if (!require("pacman")) {
+  install.packages("pacman")
+}
+pacman::p_load(frenchdata, lubridate, data.table, ggplot2)
+
+# --- 1. FETCH FAMA-FRENCH DAILY MARKET DATA ---
+cat("Downloading Kenneth French Daily Market Data...\n")
+ff_raw <- download_french_data("Fama/French 3 Factors [Daily]")
+
+# Extract the daily data subset
+ff_daily <- as.data.table(ff_raw$subsets$data[[1]])
+
+# Fix the unnamed date column (R auto-names it "...1" when missing)
+if ("...1" %in% names(ff_daily)) {
+  setnames(ff_daily, "...1", "date")
+}
+
+# Clean dates: Map to 'eom' to seamlessly merge with your existing perf_ts
+ff_daily[, eom := ymd(date)]
+
+# Isolate Excess Market Return (Decimal format)
+ff_daily[, mkt_exc := `Mkt-RF` / 100]
+
+# Filter FF data to the exact specified timeframe
+ff_clean <- ff_daily[eom >= start_date & eom <= end_date, .(eom, mkt_exc)]
+
+# --- 2. MERGE WITH STRATEGY RETURNS ---
+# Ensure perf_ts is a data.table and filter it to match the timeframe BEFORE merging
+setDT(perf_ts)
+perf_ts_filtered <- perf_ts[eom >= start_date & eom <= end_date]
+
+# Merge the daily market skeleton with the filtered strategy returns
+perf_ts_daily <- merge(ff_clean, perf_ts_filtered, by = "eom", all.x = TRUE)
+
+# Ensure the result stays a data.table
+setDT(perf_ts_daily)
+
+# Handle NAs for non-trading days (keeps cumulative line flat between monthly dates)
+perf_ts_daily[is.na(mkt_exc), mkt_exc := 0]
+perf_ts_daily[is.na(ret_lagged), ret_lagged := 0]
+
+# --- 3. CALCULATE CUMULATIVE RETURNS (BASE = 1) ---
+perf_ts_daily[, cum_ret_lagged := cumprod(1 + ret_lagged)]
+perf_ts_daily[, cum_ret_mkt_exc := cumprod(1 + mkt_exc)]
+
+# --- 4. PREPARE DATA FOR GGPLOT ---
+# Only melt the two vectors we want to plot
+plot_dt <- melt(
+  perf_ts_daily[, .(eom, cum_ret_lagged, cum_ret_mkt_exc)],
+  id.vars = "eom",
+  variable.name = "Strategy",
+  value.name = "CumRet"
+)
+
+# CRITICAL FIX: Ensure plot_dt is a data.table after melting
+setDT(plot_dt)
+
+# Rename levels for a cleaner legend
+plot_dt[,
+  Strategy := fcase(
+    Strategy == "cum_ret_lagged"  , "Gross (Lagged)"         ,
+    Strategy == "cum_ret_mkt_exc" , "Excess Market (Mkt-RF)"
+  )
+]
+
+# Ensure the factor ordering so the legend matches the visual hierarchy
+plot_dt[,
+  Strategy := factor(
+    Strategy,
+    levels = c("Gross (Lagged)", "Excess Market (Mkt-RF)")
+  )
+]
+
+# --- 5. GENERATE LOG-SCALED PLOT ---
+p_cum_ret <- ggplot(plot_dt, aes(x = eom, y = CumRet, color = Strategy)) +
+  geom_line(linewidth = 0.8) +
+  scale_y_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::comma_format(accuracy = 0.1)
+  ) +
+  scale_color_manual(
+    values = c(
+      "Gross (Lagged)" = "#1F78B4", # Red for the strategy
+      "Excess Market (Mkt-RF)" = "#95a5a6" # Grey for the baseline
+    )
+  ) +
+  labs(
+    title = "Cumulative Strategy Excess Returns vs. Daily Excess Market",
+    subtitle = paste0("Log-scaled, Base = 1 | ", start_date, " to ", end_date),
+    x = "Date",
+    y = "Cumulative Return (Log Scale)",
+    color = "Portfolio"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor.y = element_blank()
+  )
+
+# Display the plot
+print(p_cum_ret)
+
+
+# ==============================================================================
+# PHASE 2 Add-On: PERFORMANCE STATISTICS
+# ==============================================================================
+
+cat(
+  "\n=== ANNUALIZED PERFORMANCE METRICS (",
+  as.character(start_date),
+  "to",
+  as.character(end_date),
+  ") ===\n"
+)
+
+# 1. Market Metrics (Calculated on Daily frequency)
+# Using ff_clean which contains every trading day
+mkt_ann_ret <- mean(ff_clean$mkt_exc, na.rm = TRUE) * 252
+mkt_ann_vol <- sd(ff_clean$mkt_exc, na.rm = TRUE) * sqrt(252)
+mkt_sharpe <- mkt_ann_ret / mkt_ann_vol
+
+# 2. Strategy Metrics (Calculated on Monthly frequency)
+# Using perf_ts_filtered which contains only the month-end actual trading periods
+strat_ann_ret <- mean(perf_ts_filtered$ret_lagged, na.rm = TRUE) * 12
+strat_ann_vol <- sd(perf_ts_filtered$ret_lagged, na.rm = TRUE) * sqrt(12)
+strat_sharpe <- strat_ann_ret / strat_ann_vol
+
+# 3. Build and Print Summary Table
+perf_summary <- data.frame(
+  Portfolio = c("Gross (Lagged)", "Excess Market (Mkt-RF)"),
+  Ann_Return = scales::percent(c(strat_ann_ret, mkt_ann_ret), accuracy = 0.01),
+  Ann_Volatility = scales::percent(
+    c(strat_ann_vol, mkt_ann_vol),
+    accuracy = 0.01
+  ),
+  Sharpe_Ratio = round(c(strat_sharpe, mkt_sharpe), 2)
+)
+
+print(perf_summary)

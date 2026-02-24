@@ -1,0 +1,90 @@
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{tcolorbox}
+\usepackage{graphicx}
+\usepackage{multicol}
+
+% WU color definitions
+\definecolor{WUnavy}{RGB}{26,46,90}
+\definecolor{WUblue}{RGB}{30,80,162}
+\definecolor{WUgold}{RGB}{200,169,81}
+\definecolor{WUlightgray}{RGB}{240,240,240}
+
+% Beamer color settings
+\setbeamercolor{frametitle}{fg=white,bg=WUnavy}
+\setbeamercolor{title}{fg=white}
+\setbeamercolor{author}{fg=white}
+\setbeamercolor{date}{fg=white}
+\setbeamercolor{institute}{fg=white}
+\setbeamercolor{structure}{fg=WUnavy}
+\setbeamercolor{block title}{fg=white,bg=WUnavy}
+\setbeamercolor{block body}{fg=black,bg=WUlightgray}
+\setbeamercolor{alerted text}{fg=WUgold}
+\setbeamercolor{block title alerted}{fg=white,bg=WUblue}
+\setbeamercolor{block body alerted}{fg=black,bg=WUlightgray}
+\setbeamercolor{titlelike}{fg=white,bg=WUnavy}
+
+% Title page background
+\setbeamercolor{background canvas}{bg=white}
+
+% Set background for title frame
+\defbeamertemplate*{title page}{WU}[1][]
+{
+  \begin{beamercolorbox}[sep=12pt,center,wd=\paperwidth,ht=\paperheight]{WUnavy}
+    \vfill
+    {\usebeamerfont{title}\usebeamercolor[fg]{title}\inserttitle\par}
+    \vskip0.5em
+    {\usebeamerfont{subtitle}\usebeamercolor[fg]{subtitle}\insertsubtitle\par}
+    \vskip1em
+    \rule{0.8\textwidth}{0.4pt}\par
+    \vskip0.5em
+    {\usebeamerfont{author}\usebeamercolor[fg]{author}\insertauthor\par}
+    \vskip0.3em
+    {\usebeamerfont{date}\usebeamercolor[fg]{date}\insertdate\par}
+    \vfill
+  \end{beamercolorbox}
+}
+
+% Frametitle customization
+\setbeamertemplate{frametitle}{%
+  \nointerlineskip%
+  \begin{beamercolorbox}[wd=\paperwidth,ht=2.8ex,dp=1.2ex,leftskip=1em]{frametitle}%
+    {\usebeamerfont{frametitle}\insertframetitle}%
+  \end{beamercolorbox}%
+  \ifx\insertframesubtitle\@empty\else%
+  \begin{beamercolorbox}[wd=\paperwidth,ht=1.8ex,dp=0.5ex,leftskip=1em]{section in head/foot}%
+    {\footnotesize\insertframesubtitle}%
+  \end{beamercolorbox}%
+  \fi%
+}
+
+% Header with section info
+\setbeamertemplate{headline}{%
+  \begin{beamercolorbox}[ht=1.5ex,dp=0.5ex,leftskip=1em,rightskip=1em]{section in head/foot}%
+    {\tiny\color{gray}\insertsectionhead}%
+    \hfill%
+    {\tiny\color{gray}\textbf{WU Wien} $\cdot$ ILab 2026}%
+  \end{beamercolorbox}%
+}
+
+% Footline with page number
+\setbeamertemplate{footline}{%
+  \begin{beamercolorbox}[wd=\paperwidth,ht=1.5ex,dp=0.8ex,rightskip=1em]{section in head/foot}%
+    \hfill{\tiny\insertframenumber/\inserttotalframenumber}%
+  \end{beamercolorbox}%
+}
+
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{itemize item}{\color{WUnavy}\textbullet}
+\setbeamertemplate{itemize subitem}{\color{WUblue}$\circ$}
+\setbeamerfont{block title}{size=\small,series=\bfseries}
+\setbeamerfont{frametitle}{size=\normalsize,series=\bfseries}
+
+% Section title frames
+\AtBeginSection[]{
+  \begin{frame}
+  \begin{beamercolorbox}[sep=16pt,center,wd=\paperwidth,ht=0.6\paperheight]{frametitle}
+    {\Large\bfseries\insertsectionhead}
+  \end{beamercolorbox}
+  \end{frame}
+}

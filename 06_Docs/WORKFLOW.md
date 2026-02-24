@@ -119,34 +119,40 @@ FOCUS_LOOKBACKS <- c("1M", "6M", "12M")
 | Rebalancing | Every 21 trading days (drifts from calendar) | Calendar month-end | Calendar month-end | Calendar month-end |
 | Implementation lag | 1 day (explicit) | None (uses full-month ret) | 1 day (realistic) | 1 day + TC/SC/tax |
 | Universe | 36 JKP factors | 39 JKP factors, ~4,700 stocks/mo | Same | Same |
-| Period | 1963–2023 (730mo) | 1985–2024 (518mo) | Same | Same |
+| Period | 1963–2023 (730mo) | 1963–2024 (743mo) | Same | Same |
+
+> **Note on data fix (Feb 2026):** The original cluster run produced only 518 months (1985–2024) due
+> to a date-matching bug: monthly factor returns used `last_trading_day` as eom, but
+> `usa_factor_weights.parquet` uses `calendar_end_of_month`. When month-end falls on a weekend
+> (~225/744 months), these differ by 1–2 days and the inner join silently drops those months.
+> Fixed with `.dt.month_end()` in the Python code. Full 743-month history now available.
 
 ### CS_LO_50 (Long-Only at Factor Level, Median Factor Split)
 
 | Metric | Phase 1 (1M daily) | Stock gross (1M) | Lag-adj (1M) | Net+lag (1M) | Stock gross (12M) | Lag-adj (12M) | Net+lag (12M) |
 |--|--|--|--|--|--|--|--|
-| Ann Return | 5.4% | 4.7% | 3.4% | 2.1% | 5.6% | 3.8% | 2.7% |
-| Ann Vol | 5.5% | 6.5% | 5.9% | 5.9% | 6.2% | 5.3% | 5.3% |
-| Sharpe | **0.98** | 0.72 | 0.57 | 0.36 | **0.90** | 0.72 | 0.51 |
+| Ann Return | 5.4% | 4.4% | 2.8% | 1.6% | 5.1% | 3.2% | 2.2% |
+| Ann Vol | 5.5% | 6.5% | 6.0% | 6.2% | 6.1% | 5.5% | 5.5% |
+| Sharpe | **0.98** | 0.68 | 0.47 | 0.26 | **0.83** | 0.59 | 0.40 |
+
+*743 months (1963–2024). The pre-1985 period shows weaker factor momentum, pulling SR below the 518-month window (which showed SR=0.91/0.62 for 12M).*
 
 ### Why does performance fall step by step?
 
 ```
-Phase 1 daily (SR=0.98)
-  ↓ Switch to monthly calendar rebalancing
-Phase 2 stock gross (SR=0.72–0.90)      [−0.3 to −0.1 SR]
-  Cause: Daily rebalancing in Phase 1 has lower vol (5.5% vs 6.5%)
-         because it smooths the portfolio continuously.
-         Returns are similar (5.4% vs 4.7–5.6%).
+Phase 1 rolling-21d (SR=0.98)
+  ↓ Switch to monthly calendar rebalancing + longer history (743mo)
+Phase 2 stock gross (SR=0.68–0.83)      [−0.1 to −0.2 SR]
+  Cause: Monthly calendar has slightly higher vol; pre-1985 period has
+         weaker factor momentum (adds ~225 months of harder environment).
   ↓ Apply 1-day implementation lag
-Phase 2 lag-adjusted gross (SR=0.57–0.72)  [−0.15 to −0.18 SR]
-  Cause: Missing the first trading day of each month costs ~1.5–1.8% pa.
-         This is unavoidable in real implementation unless you trade at
-         the formation-month closing price.
+Phase 2 lag-adjusted gross (SR=0.47–0.59)  [−0.2 to −0.25 SR]
+  Cause: Missing day-1 costs ~1.6–1.9% pa. Larger than in 518mo window
+         because pre-1985 had stronger day-1 drift.
   ↓ Apply frictions (TC + SC + Dividend Tax)
-Phase 2 net (SR=0.36–0.51)              [−0.21 SR]
-  Cause: Total drag ~1.1% pa:
-    TC = 0.6–0.7% pa  (turnover × small-cap illiquidity)
+Phase 2 net (SR=0.26–0.40)              [−0.2 SR]
+  Cause: Total drag ~1.0% pa:
+    TC = 0.5–0.7% pa  (lower than before: fewer small-caps pre-1985)
     SC = 0.2% pa      (borrow costs on short stock legs)
     Div Tax = 0.3% pa (27.5% Austrian rate on short dividends)
 ```
@@ -155,9 +161,9 @@ Phase 2 net (SR=0.36–0.51)              [−0.21 SR]
 
 | Lookback | Stock gross SR | Lag-adj SR | Net+lag SR | Net return |
 |--|--|--|--|--|
-| 1M | 0.52 | 0.43 | 0.27 | 2.2% |
-| 6M | 0.62 | 0.52 | 0.38 | 3.2% |
-| 12M | 0.75 | 0.61 | 0.45 | 3.3% |
+| 1M | 0.44 | 0.32 | 0.17 | 1.4% |
+| 6M | 0.57 | 0.43 | 0.29 | 2.4% |
+| 12M | 0.66 | 0.48 | 0.34 | 2.6% |
 
 ---
 

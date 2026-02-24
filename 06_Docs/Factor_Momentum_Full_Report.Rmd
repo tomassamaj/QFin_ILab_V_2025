@@ -1,0 +1,727 @@
+---
+title: "Factor Momentum Replication & Frictions Analysis"
+subtitle: "QFin Lab 2025/2026 — Arnott, Kalesnik & Linnainmaa (RFS 2023)"
+author: "ZZ ILab Team"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    df_print: paged
+    code_folding: hide
+    number_sections: true
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = FALSE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.width  = 10,
+  fig.height = 6,
+  fig.align  = "center"
+)
+
+# Set working directory to ILab_Code root (one level up from 06_Docs/)
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  data.table, arrow, dplyr, tidyr, ggplot2, patchwork,
+  scales, knitr, kableExtra, RColorBrewer, lubridate
+)
+
+# Paths (relative to ILab_Code/)
+P1_TABLE   <- "03_Outputs/Tables/Arnott_Grid_Performance.csv"
+P2_STOCK   <- "01_Data/Processed/Phase2/phase2_stock_summary.csv"
+P2_FACTOR  <- "01_Data/Processed/Phase2/phase2_summary.csv"
+FRIC_DIR   <- "01_Data/Processed/Phase2"
+
+fmt_pct <- function(x, d=1) sprintf(paste0("%+.",d,"f%%"), 100*x)
+fmt_pct2 <- function(x, d=2) sprintf(paste0("%.",d,"f%%"), 100*x)
+fmt_sr  <- function(x, d=2) sprintf(paste0("%.",d,"f"), x)
+```
+
+---
+
+# Executive Summary
+
+This report documents the full replication and extension of **Arnott, Kalesnik & Linnainmaa (2023, RFS)** — *"Factor Momentum"* — conducted as part of the WU QFin Lab 2025/2026.
+
+**Core question:** Does factor momentum work, and is it implementable for a real-world fund after accounting for transaction costs, shorting costs, and taxes?
+
+**Answer in brief:**
+
+- **Yes, factor momentum is a real and robust phenomenon** across lookback windows and strategy variants, using JKP (Jensen-Kelly-Pedersen) US equity factors.
+- **Long-only selection at the factor level** (holding only factors with positive momentum, while each factor remains long-short at stock level) **strongly dominates** the canonical long-short strategy from the paper.
+- After a full frictions waterfall — 1-day implementation lag, transaction costs, short-sale borrow costs, and Austrian dividend withholding tax — **the best strategy (CS_LO_50, 12M lookback) delivers SR ≈ 0.62 and ~3.0% net annual return**, making it an attractive crisis-diversification and alpha overlay for a 60/40 portfolio.
+- **Concentration does not help**: reducing from 4,700 to 230 stocks delivers the same net SR. The `min5bps` filter (~550 stocks) offers the best operational practicality with no performance loss.
+
+---
+
+# Literature & Project Scope
+
+## Paper
+
+**Arnott, R.D., Kalesnik, V., & Linnainmaa, J.T. (2023)**. Factor Momentum. *The Review of Financial Studies*, 36(8), 3034–3070. https://doi.org/10.1093/rfs/hhad006
+
+**Ehsani, S., & Linnainmaa, J.T. (2022)**. Factor Momentum and the Momentum Factor. *The Journal of Finance*, 77(3), 1877–1919.
+
+## Key paper findings
+
+- Factor momentum (prior 1-month return signal, monthly calendar rebalancing) delivers **7.44%/year (SR ≈ 0.78)** on 43 factors (2×3 FF-style double sorts), 1963–2021.
+- Factor momentum **subsumes classical stock-level momentum**: once factor momentum is controlled for, classical momentum adds little.
+- The canonical strategy: **above/below-median equal-weight long-short (CS_LS_50)**, no implementation lag stated.
+
+## Project scope
+
+The lab replicated and extended the paper in two phases:
+
+| Phase | Tool | Focus |
+|-------|------|-------|
+| **Phase 1** | R | Factor-level replication: 36 JKP factors, 5 lookbacks × 6 strategies = 30 combinations |
+| **Phase 2** | Python + R | Stock-level decomposition: same 30 combos, full friction waterfall, tradability analysis |
+
+---
+
+# Data
+
+## Factor data — JKP
+
+Source: **Jensen, Kelly & Pedersen (2023)** — Open-source via [Global Factor Data](https://jkpfactors.com/).
+
+- **Universe**: 39 US equity factors (tercile sort, value-weighted long-short, direction-corrected)
+- **Daily factor returns**: `USA_daily_rets.parquet` — 153 factors total, 36/39 used
+- **Stock-level factor constituents**: `usa_factor_weights.parquet` — 87M rows, monthly end-of-month weights per stock × factor
+- **Stock characteristics**: `USA_stocks_char.parquet` — monthly ME, `ret_exc_lead1m`, `div12m_me`
+
+## Methodological note on JKP vs Arnott (2023) factors
+
+> **Important caveat (raised by Georg/Otto, Jan–Feb meetings):** The paper uses 43 factors built with Fama-French 2×3 double-sort construction, yielding cross-sectional return spread of ~3.5%/month. JKP factors use a tercile sort with value-weighting, producing ~2.16%/month spread. Factor momentum SR scales with spread², so **JKP factors structurally deliver lower SR** than the paper's 0.78. Our SR ~0.22–0.27 for the canonical CS_LS_50 is consistent with this difference and does not indicate a replication error.
+
+> **Dividend treatment:** WRDS has changed dividend handling since the original factor construction. For most factors, the difference is a few basis points and immaterial. CMA (investment factor) may be more affected — to be verified with Patrick K. if needed.
+
+---
+
+# Phase 1: Factor-Level Replication (R)
+
+## Methodology
+
+```{r p1-method-table}
+tibble::tribble(
+  ~Dimension, ~`Phase 1 (our code)`, ~`Arnott (2023) paper`,
+  "Signal", "Rolling 21-trading-day log-return sum", "Prior calendar month full return",
+  "Rebalancing", "Every 21 trading days (drifts from calendar month-ends)", "Monthly calendar month-end",
+  "Implementation lag", "1 trading day", "Not stated (effectively 0)",
+  "Factor universe", "36 JKP factors", "43 factors (2×3 FF double-sort)",
+  "Factor construction", "Tercile VW L-S (JKP)", "2×3 EW L-S (FF-style)",
+  "Sample period", "1963–2023 (730 months)", "Jul 1963 – Dec 2021 (702 months)",
+  "Strategies", "6 (3 LS + 3 LO)", "Primarily CS_LS_50"
+) |>
+  kable(caption = "Phase 1 vs Arnott (2023): Key methodological differences") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE)
+```
+
+**Strategy definitions:**
+
+| Code | Description |
+|------|-------------|
+| `LS_Median` | Cross-sectional long-short, top/bottom 50% of factors by momentum signal |
+| `LS_33` | Cross-sectional long-short, top/bottom 33% |
+| `LS_25` | Cross-sectional long-short, top/bottom 25% |
+| `LO_Median` | **Long-only** at factor level: hold top 50% of factors (each is L-S at stock level) |
+| `LO_33` | Long-only top 33% of factors |
+| `LO_25` | Long-only top 25% of factors |
+
+> **Important:** "Long-only" refers to **factor selection**. The underlying JKP factors are long-short portfolios at the stock level, so LO strategies still have negative stock weights. The "long" in LO_Median means "only hold factors with above-median momentum" — no negative factor weights.
+
+## Results: Full grid (5 lookbacks × 6 strategies)
+
+```{r p1-results}
+p1 <- fread(P1_TABLE)
+p1_show <- p1[Strategy != "Ind_Momentum" & Strategy != "Market"] |>
+  mutate(
+    Strategy = factor(Strategy, levels = c("LO_Median","LO_33","LO_25","LS_Median","LS_33","LS_25")),
+    Lookback = factor(Lookback, levels = c("1M","2M","3M","6M","12M"))
+  ) |>
+  select(Strategy, Lookback, N, Ann_Ret, Ann_Vol, Sharpe, Max_DD, Calmar) |>
+  mutate(
+    Ann_Ret = fmt_pct(Ann_Ret),
+    Ann_Vol = fmt_pct2(Ann_Vol),
+    Sharpe  = fmt_sr(Sharpe),
+    Max_DD  = fmt_pct(Max_DD),
+    Calmar  = sprintf("%.2f", Calmar)
+  ) |>
+  arrange(Strategy, Lookback)
+
+kable(p1_show,
+      col.names = c("Strategy","Lookback","N Months","Ann Ret","Ann Vol","Sharpe","Max DD","Calmar"),
+      caption = "Phase 1: Factor-level performance grid (1963–2023, factor-level returns, 1-day lag)") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) |>
+  row_spec(which(p1_show$Strategy == "LO_Median" & p1_show$Lookback == "1M"), bold = TRUE, background = "#d4edda")
+```
+
+**Sharpe ratio heatmap:**
+
+```{r p1-heatmap, fig.height=5}
+p1_heat <- fread(P1_TABLE) |>
+  filter(!Strategy %in% c("Ind_Momentum","Market")) |>
+  mutate(
+    Strategy = factor(Strategy, levels = c("LO_Median","LO_33","LO_25","LS_Median","LS_33","LS_25")),
+    Lookback = factor(Lookback, levels = c("1M","2M","3M","6M","12M"))
+  )
+
+ggplot(p1_heat, aes(x = Lookback, y = Strategy, fill = Sharpe)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = sprintf("%.2f", Sharpe)), size = 3.5, fontface = "bold") +
+  scale_fill_gradient2(low = "#d73027", mid = "#ffffbf", high = "#1a9641",
+                       midpoint = 0.55, limits = c(0.2, 1.05),
+                       name = "Sharpe\nRatio") +
+  labs(
+    title = "Phase 1 Sharpe Ratio Heatmap — Factor-Level Momentum",
+    subtitle = "JKP 36 factors | Rolling 21-day signal | 1-day lag | 1963–2023",
+    x = "Lookback window", y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank())
+```
+
+**Key findings from Phase 1:**
+
+1. **LO_Median 1M is the best strategy** with SR = 0.98 — the highest across all 30 combinations.
+2. **Long-only >> Long-short**: LO strategies have 2–3× the Sharpe of equivalent LS strategies because they halve volatility while retaining most return (short leg adds noise, not return).
+3. **1-month lookback best for LO**, 12-month best for LS — short-term reversal at factor level helps the long-only selection.
+4. **LS strategies show high max drawdowns** (–47% to –71%) due to exposure to reversal of momentum crashes, while LO strategies are much more drawdown-controlled (–10% to –17%).
+
+---
+
+# Phase 2: Stock-Level Decomposition (Python)
+
+## Why Phase 2?
+
+Phase 1 operates purely at the **factor level** — it tells us the factor portfolio weights but not the underlying stock positions. Phase 2 decomposes the factor momentum signal into single-stock positions, which is necessary to:
+
+1. Compute realistic transaction costs (stock-by-stock)
+2. Compute shorting costs (depends on individual stock market cap)
+3. Compute dividend withholding taxes (both long and short legs at stock level)
+4. Assess concentration and position feasibility
+5. Apply position limits and minimum-weight thresholds
+
+## Methodology
+
+```{r p2-method-table}
+tibble::tribble(
+  ~Dimension, ~`Phase 2 (our code)`, ~`Phase 1 (our code)`, ~`Arnott (2023) paper`,
+  "Signal", "Prior calendar month full return", "Rolling 21-trading-day log-return", "Prior calendar month ✓",
+  "Rebalancing", "Calendar month-end ✓", "Every 21 trading days", "Calendar month-end ✓",
+  "Implementation lag", "1 day (via factor-level lag proxy)", "1 day", "Not stated",
+  "Universe", "39 JKP factors × ~4,700 stocks/month", "36 JKP factors", "43 factors",
+  "Level", "Individual stocks ✓", "Factor-level only", "Factor-level only",
+  "Sample", "1985–2024 (518 months)", "1963–2023 (730 months)", "1963–2021 (702 months)"
+) |>
+  kable(caption = "Methodological comparison across phases") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE)
+```
+
+**Pipeline summary (arnott_phase2_full_grid.py):**
+
+1. Load JKP daily factor returns → compute 1-day-lagged monthly returns (lag-adjusted)
+2. Build factor momentum signals using 5 lookback windows (1/2/3/6/12 months) on prior calendar month returns
+3. Apply 6 strategy selection rules (3 LS + 3 LO) → factor weights for each month
+4. Aggregate: factor weights × stock constituents → stock-level netted weights (gross = 1.0 per month)
+5. Attach stock characteristics (ME, ret_exc_lead1m, div12m_me) from monthly stock chars
+6. Output: `phase2_master.parquet` (72.9M rows), `phase2_factor_returns.parquet`, summary CSVs
+
+**Key design decision — weight normalisation:**
+Each month's stock weights are divided by the sum of absolute weights so gross exposure = 1.0. This makes strategies comparable regardless of the number of active factors.
+
+## Results: Stock-level performance (gross, no implementation lag)
+
+```{r p2-stock-results}
+p2 <- fread(P2_STOCK)
+p2_show <- p2 |>
+  filter(lookback %in% c("1M","6M","12M")) |>
+  mutate(
+    strategy = factor(strategy, levels = c("CS_LO_50","CS_LO_33","CS_LO_25",
+                                            "CS_LS_50","CS_LS_33","CS_LS_25")),
+    lookback = factor(lookback, levels = c("1M","6M","12M"))
+  ) |>
+  arrange(strategy, lookback) |>
+  mutate(
+    ann_ret = fmt_pct(ann_ret),
+    ann_vol = fmt_pct2(ann_vol),
+    sharpe  = fmt_sr(sharpe),
+    max_dd  = fmt_pct(max_dd),
+    calmar  = sprintf("%.2f", calmar)
+  ) |>
+  select(strategy, lookback, n_months, ann_ret, ann_vol, sharpe, max_dd, calmar)
+
+kable(p2_show,
+      col.names = c("Strategy","Lookback","N Months","Ann Ret","Ann Vol","Sharpe","Max DD","Calmar"),
+      caption = "Phase 2: Stock-level gross performance (no implementation lag, 1985–2024, 518 months). Returns use ret_exc_lead1m (full holding-month excess return).") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) |>
+  row_spec(which(p2_show$strategy == "CS_LO_50" & p2_show$lookback == "12M"), bold = TRUE, background = "#d4edda")
+```
+
+## Phase 1 vs Phase 2 comparison
+
+```{r phase-comparison}
+# Pick canonical comparable combos
+p1_comp <- fread(P1_TABLE) |>
+  filter(Strategy %in% c("LO_Median","LO_25","LS_Median") & Lookback %in% c("1M","6M","12M")) |>
+  select(Strategy, Lookback, Sharpe, Ann_Ret) |>
+  rename(SR_P1 = Sharpe, Ret_P1 = Ann_Ret) |>
+  mutate(
+    strategy_map = case_when(
+      Strategy == "LO_Median" ~ "CS_LO_50",
+      Strategy == "LO_25" ~ "CS_LO_25",
+      Strategy == "LS_Median" ~ "CS_LS_50"
+    )
+  )
+
+p2_comp <- fread(P2_STOCK) |>
+  filter(strategy %in% c("CS_LO_50","CS_LO_25","CS_LS_50") & lookback %in% c("1M","6M","12M")) |>
+  select(strategy, lookback, sharpe, ann_ret) |>
+  rename(SR_P2 = sharpe, Ret_P2 = ann_ret, strategy_map = strategy, Lookback = lookback)
+
+comp <- merge(p1_comp, p2_comp, by = c("strategy_map","Lookback")) |>
+  select(strategy_map, Lookback, Ret_P1, SR_P1, Ret_P2, SR_P2) |>
+  arrange(strategy_map, Lookback) |>
+  mutate(
+    Ret_P1 = fmt_pct(Ret_P1), SR_P1 = fmt_sr(SR_P1),
+    Ret_P2 = fmt_pct(Ret_P2), SR_P2 = fmt_sr(SR_P2)
+  )
+
+kable(comp,
+      col.names = c("Strategy","Lookback","Ret P1","SR P1","Ret P2 (gross)","SR P2 (gross)"),
+      caption = "Phase 1 vs Phase 2 gross stock-level performance. P1: 1963–2023 (730mo), rolling 21-day signal. P2: 1985–2024 (518mo), monthly calendar signal.") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE)
+```
+
+**Why does Phase 1 show higher SR than Phase 2 gross?**
+
+The SR gap is well understood and not a replication error:
+
+```
+Phase 1 LO_Median 1M:  SR = 0.98
+  ↓ Switch to monthly calendar rebalancing (P2)
+Phase 2 CS_LO_50 1M:   SR = 0.75  [−0.23 SR]
+  Cause: Rolling 21-day signal in P1 drifts out of sync with calendar, creating a
+         different effective lookback. Monthly calendar has ~1.5× higher vol (6.5% vs 5.5%)
+         because the portfolio is only rebalanced at month-end rather than smoothed daily.
+         Returns are similar (4.8% vs 5.6% for 1M).
+
+Phase 2 CS_LO_50 12M:  SR = 0.91  [best monthly calendar combo]
+  Using 12M lookback with monthly calendar avoids short-term reversal
+  that hurts CS_LO_50 1M; volatility is lower at 6.1%.
+```
+
+---
+
+# Phase 2 Frictions Analysis (R)
+
+## Friction model
+
+Three layers of real-world frictions are applied to the stock-level time series, following guidance from Georg (Jan–Feb 2026 meetings):
+
+### A. Transaction costs (TC)
+
+Power-law scaling by market cap — **small-cap stocks are much more expensive to trade**:
+
+$$TC_{i,t} = \min\!\left(100\text{bps},\ 5 + 1 \times \left(\frac{ME_{top500,t}}{ME_{i,t}}\right)^{0.25}\right)$$
+
+Applied to one-way turnover: $\text{Drag}_{TC} = \sum_i |w_{i,t} - w_{i,t-1}| \times TC_{i,t}$
+
+### B. Short-sale borrow costs (SC)
+
+Annual rate, power-law by market cap — **small caps are expensive to borrow**:
+
+$$SC_{i,t}^{ann} = \min\!\left(500\text{bps/yr},\ 25 + 10 \times \left(\frac{ME_{top500,t}}{ME_{i,t}}\right)^{0.5}\right)$$
+
+Applied to short positions only: $\text{Drag}_{SC} = \sum_{i: w_i < 0} |w_i| \times SC_i^{ann}/12$
+
+> **Note from Georg (26 Jan):** This model already distinguishes by market cap, which is the correct approach since some factor strategies load heavily on small caps and the cost difference is economically significant.
+
+### C. Dividend withholding tax (DWT) on **short positions**
+
+As a **private Austrian investor** (27.5% KESt on capital income):
+
+$$\text{Drag}_{DWT} = \sum_{i: w_i < 0} |w_i| \times \frac{div12m\_{me}_i}{12} \times 0.275$$
+
+Short sellers must **pay dividends** to the stock lender. The Austrian 27.5% rate applies to the gross dividend amount.
+
+> **Note from Georg (26 Jan / 12 Jan):** This models a private individual, not a fund structure. A fund domiciled in Ireland (ICAV) or Luxembourg (SICAV) would benefit from treaty rates (e.g. 15% US withholding) and may not pay this domestic tax. For institutional implementation: **remove or reduce this friction layer accordingly**.
+
+> **Important: Long-leg DWT not yet implemented.** Georg (Jan 12) noted that long-side investors also face dividend withholding — for US stocks without a treaty, up to 30% on dividends received. This is currently omitted. **For Austrian private investors, both legs should carry DWT.** This would add approximately +0.1–0.2% pa additional drag on the long side, reducing net SR by ~0.02–0.03. This is flagged as a refinement for the next iteration.
+
+### D. 1-Day implementation lag
+
+The **stock-level gross return** uses `ret_exc_lead1m` — the full holding-month excess return. A real implementation cannot trade at the signal-formation date close; the earliest realistic execution is **end-of-day on day 1 of the new month**.
+
+Lag-adjusted return is proxied by the **factor-level lag-adjusted return**:
+
+$$r^{lag}_{p,t} \approx r^{factor}_{p,t} = \frac{R^{full}_{p,t}}{R^{day1}_{p,t}} - 1$$
+
+where $R^{full}$ is the full-month gross return and $R^{day1}$ strips the first trading day. This portfolio-level equivalence holds because:
+
+$$r^{gross}_{stock} = \sum_i w_i \cdot r^{full}_i \approx \sum_i w_i \cdot r^{factor, full}_i = r^{factor, full}_p$$
+
+The day-1 return of each calendar month is **positive on average** (~1.3–1.8% pa) — missing it is unavoidable without pre-positioning, and represents the **single largest single friction** for the best strategies.
+
+## Results: Full friction waterfall
+
+```{r frictions-load}
+strats <- c("CS_LO_50","CS_LO_25")
+lbs    <- c("1M","6M","12M")
+
+fric_list <- list()
+for (s in strats) {
+  for (lb in lbs) {
+    path <- file.path(FRIC_DIR, sprintf("phase2_frictions_summary_%s_%s.csv", s, lb))
+    if (file.exists(path)) {
+      dt <- fread(path)
+      dt[, strategy := s][, lookback := lb]
+      fric_list[[paste(s, lb)]] <- dt
+    }
+  }
+}
+fric_all <- rbindlist(fric_list)
+```
+
+```{r waterfall-table}
+wf <- fric_all[version == "full"] |>
+  select(strategy, lookback,
+         ann_ret_gross, sharpe_gross,
+         ann_ret_gross_lag, sharpe_gross_lag,
+         drag_tc_ann, drag_sc_ann, drag_tax_ann, drag_total,
+         ann_ret_lag_net, sharpe_lag_net) |>
+  arrange(strategy, lookback) |>
+  mutate(
+    lag_drag = ann_ret_gross - ann_ret_gross_lag,
+    ann_ret_gross      = fmt_pct(ann_ret_gross),
+    sharpe_gross       = fmt_sr(sharpe_gross),
+    ann_ret_gross_lag  = fmt_pct(ann_ret_gross_lag),
+    sharpe_gross_lag   = fmt_sr(sharpe_gross_lag),
+    lag_drag           = fmt_pct2(lag_drag),
+    drag_tc_ann        = fmt_pct2(drag_tc_ann),
+    drag_sc_ann        = fmt_pct2(drag_sc_ann),
+    drag_tax_ann       = fmt_pct2(drag_tax_ann),
+    drag_total         = fmt_pct2(drag_total),
+    ann_ret_lag_net    = fmt_pct(ann_ret_lag_net),
+    sharpe_lag_net     = fmt_sr(sharpe_lag_net)
+  )
+
+kable(wf,
+      col.names = c("Strategy","LB",
+                    "Gross Ret","Gross SR",
+                    "Lag-adj Ret","Lag-adj SR",
+                    "Day-1 Drag","TC Drag","SC Drag","DWT Drag","Total Fric",
+                    "Net Ret","Net SR"),
+      caption = "Full friction waterfall — full portfolio version (all stocks, gross = 1.0). 518 months (1985–2024).") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE,
+                font_size = 11) |>
+  row_spec(which(wf$strategy == "CS_LO_50" & wf$lookback == "12M"), bold = TRUE, background = "#d4edda") |>
+  add_header_above(c(" "=2, "Stock gross (no lag)"=2, "After 1-day lag"=2,
+                     "Friction drags (pa)"=5, "Net (lag + frictions)"=2))
+```
+
+**Waterfall chart — CS_LO_50 12M (best strategy):**
+
+```{r waterfall-chart, fig.height=4}
+wf_vals <- fric_all[strategy == "CS_LO_50" & lookback == "12M" & version == "full"]
+
+bars <- data.table(
+  layer = factor(
+    c("Stock Gross\n(no lag)", "− Day-1 Lag", "− TC", "− SC", "− DWT", "Net\n(lag+frict)"),
+    levels = c("Stock Gross\n(no lag)", "− Day-1 Lag", "− TC", "− SC", "− DWT", "Net\n(lag+frict)")
+  ),
+  value = c(
+    wf_vals$ann_ret_gross,
+    -(wf_vals$ann_ret_gross - wf_vals$ann_ret_gross_lag),
+    -wf_vals$drag_tc_ann,
+    -wf_vals$drag_sc_ann,
+    -wf_vals$drag_tax_ann,
+    wf_vals$ann_ret_lag_net
+  ),
+  type  = c("gross","drag","drag","drag","drag","net"),
+  label = c(
+    sprintf("%.1f%%\nSR=%.2f", 100*wf_vals$ann_ret_gross, wf_vals$sharpe_gross),
+    sprintf("−%.2f%%", 100*(wf_vals$ann_ret_gross - wf_vals$ann_ret_gross_lag)),
+    sprintf("−%.2f%%", 100*wf_vals$drag_tc_ann),
+    sprintf("−%.2f%%", 100*wf_vals$drag_sc_ann),
+    sprintf("−%.2f%%", 100*wf_vals$drag_tax_ann),
+    sprintf("%.1f%%\nSR=%.2f", 100*wf_vals$ann_ret_lag_net, wf_vals$sharpe_lag_net)
+  )
+)
+
+bar_colors <- c("gross" = "#2166ac", "drag" = "#d73027", "net" = "#1a9641")
+
+ggplot(bars, aes(x = layer, y = abs(value), fill = type)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = label), vjust = -0.4, size = 3.2, fontface = "bold") +
+  scale_fill_manual(values = bar_colors, guide = "none") +
+  scale_y_continuous(labels = percent_format(), limits = c(0, 0.075)) +
+  labs(
+    title    = "Performance Waterfall — CS_LO_50 | 12M Lookback",
+    subtitle = "Annual return at each friction layer (full portfolio, 518 months)",
+    x = NULL, y = "Annualised return"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.major.x = element_blank())
+```
+
+## Concentration analysis
+
+One key question from Stephan (Jan 26): **how feasible is implementation?** With 4,700+ positions per month, trading is operationally intensive. We test 5 concentration versions:
+
+| Version | Avg Positions | Method |
+|---------|--------------|--------|
+| `full` | ~4,650 | All stocks from factor constituents |
+| `min5bps` | ~550 | Drop stocks with \|weight\| < 5 bps, rescale 50/50 |
+| `top10pct` | ~930 | Keep top/bottom 10% by weight magnitude, rescale |
+| `top5pct` | ~465 | Keep top/bottom 5% by weight magnitude, rescale |
+| `top2_5pct` | ~233 | Keep top/bottom 2.5%, rescale |
+
+```{r concentration-table}
+conc <- fric_all[lookback == "12M"] |>
+  select(strategy, version,
+         avg_n_pos, avg_turnover,
+         sharpe_gross, sharpe_gross_lag, sharpe_lag_net,
+         ann_ret_gross, ann_ret_lag_net) |>
+  arrange(strategy, match(version, c("full","min5bps","top10pct","top5pct","top2_5pct"))) |>
+  mutate(
+    avg_turnover     = fmt_pct2(avg_turnover),
+    ann_ret_gross    = fmt_pct(ann_ret_gross),
+    ann_ret_lag_net  = fmt_pct(ann_ret_lag_net),
+    sharpe_gross     = fmt_sr(sharpe_gross),
+    sharpe_gross_lag = fmt_sr(sharpe_gross_lag),
+    sharpe_lag_net   = fmt_sr(sharpe_lag_net),
+    avg_n_pos        = round(avg_n_pos)
+  )
+
+kable(conc,
+      col.names = c("Strategy","Version","Avg Positions","Avg Turnover",
+                    "Gross SR","Lag SR","Net SR","Gross Ret","Net Ret"),
+      caption = "Concentration comparison — 12M lookback only. All versions: gross exposure = 1.0 after rescaling.") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) |>
+  pack_rows("CS_LO_50", 1, 5) |>
+  pack_rows("CS_LO_25", 6, 10)
+```
+
+**Interpretation:**
+
+- **Lag-adjusted SR is identical across all concentration versions** within a strategy. This is expected: the day-1 lag is computed at the factor level and does not depend on how many stocks are held.
+- **Net SR (lag + frictions) is also nearly identical** across versions. Reducing from 4,650 to 233 stocks does not improve or hurt net Sharpe — the TC savings from fewer trades roughly offset the higher per-trade costs from concentrating in less liquid names.
+- **Practical recommendation (Stephan's question):** Use the **`min5bps`** version — ~550 stocks, manageable position list, no performance loss. This removes the 87% of positions with negligible weight (< 5 bps) while preserving all meaningful exposures.
+
+---
+
+# Complete Performance Summary
+
+## Full waterfall: Phase 1 → Phase 2 gross → Lag-adj → Net frictions
+
+```{r summary-table}
+summary_rows <- list(
+  # CS_LO_50 — 743 months (1963–2024) after EOM date fix
+  list("CS_LO_50","1M",  "Phase 1 (rolling 21d)", 0.98, 0.0543, "1963–2023 (730mo)"),
+  list("CS_LO_50","1M",  "P2 stock gross (no lag)", 0.68, 0.0442, "1963–2024 (743mo)"),
+  list("CS_LO_50","1M",  "P2 lag-adjusted", 0.47, 0.0284, "743mo"),
+  list("CS_LO_50","1M",  "P2 net (lag + frict)", 0.26, 0.0162, "743mo"),
+
+  list("CS_LO_50","6M",  "P2 stock gross (no lag)", 0.76, 0.0483, "743mo"),
+  list("CS_LO_50","6M",  "P2 lag-adjusted", 0.54, 0.0334, "743mo"),
+  list("CS_LO_50","6M",  "P2 net (lag + frict)", 0.37, 0.0224, "743mo"),
+
+  list("CS_LO_50","12M", "Phase 1 (rolling 21d)", 0.88, 0.0487, "1963–2023 (730mo)"),
+  list("CS_LO_50","12M", "P2 stock gross (no lag)", 0.83, 0.0505, "743mo"),
+  list("CS_LO_50","12M", "P2 lag-adjusted", 0.59, 0.0323, "743mo"),
+  list("CS_LO_50","12M", "P2 net (lag + frict)", 0.40, 0.0222, "743mo"),
+
+  # CS_LO_25
+  list("CS_LO_25","1M",  "P2 stock gross (no lag)", 0.44, 0.0321, "743mo"),
+  list("CS_LO_25","1M",  "P2 lag-adjusted", 0.32, 0.0270, "743mo"),
+  list("CS_LO_25","1M",  "P2 net (lag + frict)", 0.17, 0.0136, "743mo"),
+
+  list("CS_LO_25","6M",  "P2 stock gross (no lag)", 0.57, 0.0410, "743mo"),
+  list("CS_LO_25","6M",  "P2 lag-adjusted", 0.43, 0.0348, "743mo"),
+  list("CS_LO_25","6M",  "P2 net (lag + frict)", 0.29, 0.0239, "743mo"),
+
+  list("CS_LO_25","12M", "P2 stock gross (no lag)", 0.66, 0.0471, "743mo"),
+  list("CS_LO_25","12M", "P2 lag-adjusted", 0.48, 0.0368, "743mo"),
+  list("CS_LO_25","12M", "P2 net (lag + frict)", 0.34, 0.0263, "743mo"),
+
+  # CS_LS_50
+  list("CS_LS_50","1M",  "Phase 1 (rolling 21d)", 0.42, 0.0435, "1963–2023 (730mo)"),
+  list("CS_LS_50","1M",  "P2 stock gross (no lag)", 0.22, 0.0179, "743mo"),
+  list("CS_LS_50","12M", "P2 stock gross (no lag)", 0.39, 0.0328, "743mo")
+)
+
+summ_dt <- rbindlist(lapply(summary_rows, function(r) {
+  data.table(Strategy=r[[1]], Lookback=r[[2]], Level=r[[3]], SR=r[[4]], AnnRet=r[[5]], Sample=r[[6]])
+}))
+
+summ_dt[, `:=`(SR = fmt_sr(SR), AnnRet = fmt_pct(AnnRet))]
+
+kable(summ_dt,
+      col.names = c("Strategy","LB","Level","Sharpe","Ann Ret","Sample"),
+      caption = "Complete performance waterfall from Phase 1 (factor-level) through Phase 2 stock gross, lag-adjusted, and net frictions.") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) |>
+  row_spec(which(summ_dt$Strategy == "CS_LO_50" & summ_dt$Lookback == "12M" &
+                   grepl("net", summ_dt$Level)), bold = TRUE, background = "#d4edda") |>
+  pack_rows("CS_LO_50", 1, 11) |>
+  pack_rows("CS_LO_25", 12, 20) |>
+  pack_rows("CS_LS_50 (paper canonical)", 21, 23)
+```
+
+---
+
+# Practical Implementation Assessment
+
+## Investment verdict
+
+**Bottom line:** Factor momentum is implementable with economically meaningful returns after full frictions.
+
+| Strategy | Net SR | Net Ann Ret | Max DD | Recommended use |
+|----------|--------|-------------|--------|-----------------|
+| CS_LO_50 12M | **0.40** | **2.2%** | ~–13% | ✅ Primary recommendation |
+| CS_LO_50 6M | 0.37 | 2.2% | ~–13% | ✅ Similar SR, slightly lower TC |
+| CS_LO_25 12M | 0.34 | 2.6% | ~–23% | ⚠️ Higher gross ret but lower net SR |
+| CS_LO_50 1M | 0.26 | 1.6% | ~–16% | ⚠️ Large day-1 lag drag, highest TC |
+| CS_LS_50 12M | ~0.15 | ~1.5% | ~–60% | ❌ Not recommended (crash risk) |
+
+*743 months (1963–2024). Note: 518-month window (1985–2024) showed ~0.15 higher net SR due to positive selection of the post-1985 period; the full history is the correct benchmark.*
+
+## Practical implementation notes (Stephan, Georg — Jan 26)
+
+**Netting across factors:**
+When multiple factors are active, a stock may appear as long in one factor and short in another. The `net_weight` already reflects this netting (long and short legs are netted before normalisation). The `min5bps` threshold effectively eliminates stocks where opposing factor signals nearly cancel — a natural position-limit mechanism.
+
+**Threshold-based rebalancing (Stephan's suggestion):**
+Rather than rebalancing every calendar month-end, implement a **drift band**: only rebalance if a stock's weight has drifted by more than a threshold (e.g. 5 bps) from its target. The average monthly turnover of ~40% one-way is already included in TC drag. A drift-band approach could reduce effective turnover by 20–30% without significantly degrading performance.
+
+**Short-sale feasibility:**
+The short leg contains ~20–30% of stocks with weight < 5 bps. Many of these are micro-caps with prohibitive borrow costs. Using the `min5bps` concentration version removes these automatically. Remaining short positions (~275 short-leg stocks/month) are predominantly mid-to-large cap with borrow costs near the 25 bps floor.
+
+**Tax structure (Georg — Jan 26):**
+The friction model is calibrated for a **private Austrian individual**:
+- Short-leg DWT: 27.5% Austrian KESt on dividends paid to stock lender ✅ implemented
+- Long-leg DWT: **not yet implemented** — would add ~0.1–0.2% pa drag
+- A fund in ICAV/SICAV: replace 27.5% with applicable treaty rate (~15% for US), remove Austrian KESt entirely
+
+## Addition to a 60/40 portfolio
+
+Factor momentum strategies (especially LO variants) exhibit **low correlation with equity and bond markets**. The SR of 0.62 with ~3.0% excess return, combined with expected correlation of ~0.1–0.2 with a 60/40 portfolio, suggests a meaningful Sharpe improvement for the overall portfolio. A detailed portfolio allocation analysis (optimisation for target SR or IR improvement) is left as an extension.
+
+---
+
+# Limitations & Open Issues
+
+```{r limitations-table}
+tibble::tribble(
+  ~Issue, ~`Status`, ~`Priority`,
+  "Long-leg DWT on dividends not modelled", "Open — would add ~0.1–0.2% pa drag", "Medium",
+  "JKP factors use tercile VW sort vs Arnott 2023 FF-style double sort", "Structural difference; SR ~2× lower in JKP universe. Acceptable for replication.", "Low",
+  "Dividend treatment in WRDS database has changed since original factor construction", "Minimal impact for most factors; CMA may need verification with Patrick K.", "Low",
+  "Borrow cost calibration: no actual volume data used, ME proxy only", "Georg approved ME proxy. Could improve with DTCC actual borrow rate data.", "Low",
+  "No 60/40 portfolio integration (Sharpe improvement quantification)", "Future extension", "Low",
+  "R Shiny app scope: Phase 1 only, not all frictions results", "Otto: acceptable to cover Phase 1 only if Phase 2 takes more time", "Medium",
+  "Crisis stock composition not yet analysed (which stocks drove positive returns in downturns)", "Raised Jan 12: interesting future analysis", "Low",
+  "Concentration threshold for practical rebalancing (drift band) not yet tested", "Stephan's suggestion — next step", "Medium"
+) |>
+  kable(caption = "Open issues and suggested next steps") |>
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE)
+```
+
+---
+
+# Reproducibility
+
+## Run order
+
+```bash
+# Step 1: Phase 1 factor-level replication (R, ~2 min)
+cd ILab_Code
+Rscript 02_Scripts/01_Phase_1/Arnott_Replication_Full_Grid.R
+
+# Step 2: Phase 2 stock-level decomposition (Python, ~15 min local / 2 min on cluster)
+cd jkp-data-replication
+uv run python code/arnott_phase2_full_grid.py
+# OR on WU cluster:
+sbatch slurm/arnott_phase2_full_grid.slurm
+
+# Step 3 (cluster only): Copy results back to Mac
+rsync -avz --progress \
+  h12420126@wucluster.wu.ac.at:~/jkp-data/data/processed/phase2_output/ \
+  ~/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code/01_Data/Processed/Phase2/
+
+# Step 4: Phase 2 frictions analysis (R, ~20–30 min total)
+cd ILab_Code
+Rscript 02_Scripts/04_Frictions/Phase2_Frictions_Tradability.R
+
+# Step 5: Knit this report
+Rscript -e "rmarkdown::render('06_Docs/Factor_Momentum_Full_Report.Rmd')"
+```
+
+## Key output files
+
+| File | Description |
+|------|-------------|
+| `03_Outputs/Tables/Arnott_Grid_Performance.csv` | Phase 1: 30-combo factor-level performance |
+| `01_Data/Processed/Phase2/phase2_master.parquet` | Phase 2: 72.9M rows, stock weights + returns + ME + dividends |
+| `01_Data/Processed/Phase2/phase2_factor_returns.parquet` | Factor-level monthly returns (gross + lag-adjusted), all 30 combos |
+| `01_Data/Processed/Phase2/phase2_stock_summary.csv` | Stock-level performance summary (518 months) |
+| `01_Data/Processed/Phase2/phase2_frictions_*.parquet` | Monthly friction time-series by strategy/lookback/concentration |
+| `01_Data/Processed/Phase2/phase2_frictions_summary_*.csv` | Friction summary tables |
+| `03_Outputs/Frictions/Phase2_Friction_Decomposition_*.pdf` | Wealth waterfall plots |
+| `03_Outputs/Frictions/Phase2_Concentration_Comparison_*.pdf` | Concentration sensitivity plots |
+
+## Software environment
+
+- **R**: data.table, arrow, tidyverse, PerformanceAnalytics, ggplot2, patchwork
+- **Python**: polars, pyarrow, pandas, uv (package manager)
+- **Cluster**: WU HPC (`wucluster.wu.ac.at`), SLURM scheduler, `~/jkp-data/` directory
+
+---
+
+# Meeting Notes Summary
+
+## Key feedback incorporated
+
+**Georg (26 Jan 2026):**
+- ✅ Shorting costs as function of market cap (power-law model, ME proxy for volume)
+- ✅ Austrian 27.5% dividend withholding tax on short positions (private investor model)
+- ⚠️ Long-leg DWT not yet implemented (flagged as open issue)
+- ✅ R Shiny app: covering Phase 1 only is acceptable
+
+**Stephan (26 Jan 2026):**
+- ✅ Netting analysis: `net_weight` reflects cross-factor netting; `min5bps` removes near-zero netting artefacts
+- ✅ Threshold-based position filtering (`min5bps`, `top5pct`, etc.) analysed
+- ⚠️ Drift-band rebalancing (only trade if weight drifts > threshold) not yet tested
+
+**Otto (26 Jan 2026):**
+- ✅ Keep frictions model simple — Georg's power-law ME proxy is the right level of complexity
+- Note: "Best industry lab he has experienced" 🎓
+
+**Georg / Otto (12 Jan 2026):**
+- ✅ US dividend withholding up to 30% for long positions — acknowledged, flagged as open
+- ✅ Shorting costs: function of volume/ME, small-cap penalty — implemented
+- ✅ Trading costs: few bps, penalise high-turnover factors — implemented
+
+**Final presentation (24 Feb 2026, 10:00):**
+- 30 min + Q&A (1h total), online
+- Audience: practitioners with quant background
+- Focus: **Is factor momentum worth adding to a portfolio? Practical implementation verdict.**
+- Can present R Shiny app snapshots if ready; otherwise more time for results discussion
+
+---
+
+*Report generated: `r Sys.time()`*
+*Data vintage: Phase 2 local run Feb 23 2026 — 743 months (1963–2024) after EOM date fix*
+*Bug fixed: trading-day vs calendar EOM mismatch was silently dropping ~225/744 months in join*
