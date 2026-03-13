@@ -1,7 +1,7 @@
 # ==============================================================================
 # PORTFOLIO TRADEABILITY ANALYSIS & WRDS TICKER MAPPING
 # ==============================================================================
-# Purpose: 
+# Summary: 
 #   1. Connect to WRDS and map stock IDs to tickers/names
 #   2. Analyze portfolio concentration and tradeability
 #   3. Visualize monthly portfolio characteristics
@@ -10,7 +10,7 @@
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(
   tidyverse, arrow, data.table, lubridate, 
-  RPostgres, DBI,  # WRDS connection
+  RPostgres, DBI,
   ggplot2, gridExtra, scales, ggridges, patchwork
 )
 
@@ -52,7 +52,7 @@ wrds <- dbConnect(
   sslmode = "require"
 )
 
-cat("✅ Connected to WRDS\n")
+cat("Connected to WRDS\n")
 
 # ==============================================================================
 # STEP 2: LOAD PORTFOLIO DATA AND EXTRACT UNIQUE STOCK IDS
@@ -77,11 +77,10 @@ cat("Unique stocks across all months:", length(unique_ids), "\n")
 
 cat("\n=== STEP 3: Mapping Stock IDs to Tickers ===\n")
 
-# The 'id' column in JKP data is typically 'permno' from CRSP
-# We'll query CRSP to get ticker symbols and company names
-
+# The 'id' column in JKP data is 'permno' from CRSP
+# Query CRSP to get ticker symbols and company names
 # Build query to get the most recent ticker for each permno
-# We'll use the CRSP stocknames table which has the full history
+# We use the CRSP stocknames table which has the full history
 
 cat("Querying CRSP for ticker mappings...\n")
 
@@ -106,7 +105,7 @@ query <- sprintf("
 ticker_map <- dbGetQuery(wrds, query)
 setDT(ticker_map)
 
-cat("✅ Retrieved", nrow(ticker_map), "ticker mappings\n")
+cat("Retrieved", nrow(ticker_map), "ticker mappings\n")
 
 # For permnos not found (delisted or merged), get last known ticker
 missing_permnos <- setdiff(unique_ids, ticker_map$permno)
@@ -137,7 +136,7 @@ if (length(missing_permnos) > 0) {
   # Combine
   ticker_map <- rbind(ticker_map, ticker_map_delisted, fill = TRUE)
   
-  cat("✅ Retrieved", nrow(ticker_map_delisted), "delisted ticker mappings\n")
+  cat("Retrieved", nrow(ticker_map_delisted), "delisted ticker mappings\n")
 }
 
 # Clean up ticker symbols
@@ -169,7 +168,7 @@ print(head(ticker_map[order(-permno)], 10))
 
 # Disconnect from WRDS
 dbDisconnect(wrds)
-cat("\n✅ Disconnected from WRDS\n")
+cat("\nDisconnected from WRDS\n")
 
 # ==============================================================================
 # STEP 4: MERGE TICKER INFO INTO PORTFOLIO
@@ -185,17 +184,16 @@ portfolio_enriched <- merge(
   all.x = TRUE
 )
 
-# Calculate some useful metrics
+# Calculate metrics
 portfolio_enriched[, abs_weight := abs(net_weight)]
-portfolio_enriched[, position_value := abs_weight * 1000000] # Assuming $1M portfolio
+portfolio_enriched[, position_value := abs_weight * 1000000] # Assuming 1M USD portfolio
 
-# Save enriched portfolio
 write_parquet(
   portfolio_enriched,
   file.path(OUTPUT_DIR, "stock_portfolio_with_tickers.parquet")
 )
 
-cat("✅ Enriched portfolio saved\n")
+cat("Enriched portfolio saved\n")
 
 # ==============================================================================
 # STEP 5: PORTFOLIO CONCENTRATION ANALYSIS
@@ -216,7 +214,7 @@ monthly_stats <- portfolio_enriched[, .(
   top5_pct = sum(head(sort(abs_weight, decreasing = TRUE), 5)),
   top10_pct = sum(head(sort(abs_weight, decreasing = TRUE), 10)),
   
-  # HHI (Herfindahl-Hirschman Index)
+  # Herfindahl-Hirschman Index
   hhi = sum(abs_weight^2),
   
   # Exchange distribution
@@ -246,7 +244,7 @@ cat("\n=== STEP 6: Tradeability Analysis ===\n")
 # 2. Liquidity (volume, spread)
 # 3. Position size relative to ADV
 
-# We'll need to go back to WRDS for market cap and volume data
+# We need to go back to WRDS for market cap and volume data
 # For now, let's analyze what we have
 
 # Position size distribution
@@ -276,7 +274,7 @@ cat("\n=== STEP 7: Generating Visualizations ===\n")
 pdf(file.path(ANALYSIS_DIR, "Portfolio_Tradeability_Analysis.pdf"), 
     width = 14, height = 10)
 
-# --- PAGE 1: Overview Statistics ---
+# --- Overview Statistics ---
 
 # 1. Number of stocks over time
 p1 <- ggplot(monthly_stats, aes(x = trade_month)) +
@@ -344,7 +342,7 @@ p4 <- ggplot(monthly_stats, aes(x = trade_month)) +
 # Arrange in grid
 grid.arrange(p1, p2, p3, p4, ncol = 2)
 
-# --- PAGE 2: Position Distribution ---
+# --- Position Distribution ---
 
 # Violin plot of position sizes by year
 portfolio_enriched[, year := year(trade_month)]
@@ -383,7 +381,7 @@ p6 <- portfolio_enriched[trade_month >= "2015-01-01"] %>%
 
 print(p6)
 
-# --- PAGE 3: Exchange & Security Type Distribution ---
+# --- Exchange & Security Type Distribution ---
 
 # Exchange over time
 exchange_time <- portfolio_enriched[, .(
@@ -437,7 +435,7 @@ p8 <- ggplot(type_pct, aes(x = trade_month, y = pct, fill = share_type)) +
 
 print(p8)
 
-# --- PAGE 4: Factor Diversification ---
+# --- Factor Diversification ---
 
 p9 <- ggplot(portfolio_enriched, aes(x = n_factors)) +
   geom_histogram(binwidth = 1, fill = "#3498DB", color = "white") +
@@ -467,7 +465,7 @@ print(p10)
 
 dev.off()
 
-cat("\n✅ PDF report saved to:", file.path(ANALYSIS_DIR, "Portfolio_Tradeability_Analysis.pdf"), "\n")
+cat("\nPDF report saved to:", file.path(ANALYSIS_DIR, "Portfolio_Tradeability_Analysis.pdf"), "\n")
 
 # ==============================================================================
 # STEP 8: DETAILED POSITION ANALYSIS FOR MOST RECENT MONTH
@@ -514,7 +512,7 @@ write_csv(
   file.path(OUTPUT_DIR, paste0("trade_list_detailed_", latest_month, ".csv"))
 )
 
-cat("\n✅ Detailed trade list saved\n")
+cat("\nDetailed trade list saved\n")
 
 # ==============================================================================
 # STEP 9: TRADEABILITY SCORES
@@ -578,19 +576,19 @@ ggsave(
 
 cat("\n=== FINAL SUMMARY ===\n\n")
 
-cat("📊 Portfolio Characteristics (Full History):\n")
+cat("Portfolio Characteristics (Full History):\n")
 cat("  • Average stocks per month:", round(mean(monthly_stats$n_stocks)), "\n")
 cat("  • Average HHI (concentration):", round(mean(monthly_stats$hhi), 4), "\n")
 cat("  • Average gross exposure:", round(mean(monthly_stats$gross_exposure), 2), "x\n")
 cat("  • Average |net| exposure:", round(mean(abs(monthly_stats$net_exposure)), 2), "x\n\n")
 
-cat("📈 Most Recent Month (", as.character(latest_month), "):\n")
+cat("Most Recent Month (", as.character(latest_month), "):\n")
 cat("  • Total stocks:", nrow(latest_portfolio), "\n")
 cat("  • Long:", sum(latest_portfolio$net_weight > 0), "| Short:", sum(latest_portfolio$net_weight < 0), "\n")
 cat("  • Top position:", scales::percent(max(latest_portfolio$abs_weight), 0.01), "\n")
 cat("  • Avg tradeability score:", round(mean(latest_portfolio$tradeability_score), 1), "/ 8\n\n")
 
-cat("✅ All analysis files saved to:", ANALYSIS_DIR, "\n")
+cat("All analysis files saved to:", ANALYSIS_DIR, "\n")
 cat("\nFiles created:\n")
 cat("  1. Portfolio_Tradeability_Analysis.pdf - Full visual report\n")
 cat("  2. tradeability_score.png - Tradeability over time\n")
