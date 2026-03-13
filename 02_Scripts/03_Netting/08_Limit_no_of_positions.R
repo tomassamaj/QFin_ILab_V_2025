@@ -1,4 +1,5 @@
-# --- LIBRARIES ---
+
+# LIBRARIES  --------------------------------------------------------------
 if (!require("pacman")) {
   install.packages("pacman")
 }
@@ -35,7 +36,7 @@ dt[,
 
 
 # ==============================================================================
-# VERSION A: TOP & BOTTOM 5 PERCENTILES (10% Total Positions)
+# VERSION A: TOP & BOTTOM 5 PERCENTILES (10% Total Positions) ------------------------
 # ==============================================================================
 
 # Filter positions
@@ -58,7 +59,7 @@ write_parquet(dt_dec_ls, OUTPUT_FILE_10)
 
 
 # ==============================================================================
-# VERSION B: TOP & BOTTOM 2.5 PERCENTILES (5% Total Positions)
+# # VERSION B: TOP & BOTTOM 2.5 PERCENTILES (5% Total Positions) ----------
 # ==============================================================================
 
 # Filter positions

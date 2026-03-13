@@ -1,5 +1,5 @@
 # ==============================================================================
-# ENHANCED TRADEABILITY: MARKET CAP & LIQUIDITY ANALYSIS
+# ENHANCED TRADEABILITY: MARKET CAP & LIQUIDITY ANALYSIS ------------------
 # ==============================================================================
 # Purpose: Add market cap and trading volume data to assess real-world tradeability
 # ==============================================================================
@@ -20,7 +20,7 @@ ANALYSIS_DIR <- file.path(BASE_DIR, "03_Outputs/Analysis")
 PORTFOLIO_WITH_TICKERS <- file.path(OUTPUT_DIR, "stock_portfolio_with_tickers.parquet")
 
 # ==============================================================================
-# STEP 1: LOAD PORTFOLIO WITH TICKERS
+# 1: LOAD PORTFOLIO WITH TICKERS ------------------------------------------
 # ==============================================================================
 
 cat("\n=== Loading Portfolio Data ===\n")
@@ -38,7 +38,7 @@ stock_months <- portfolio[, .(
 cat("Need liquidity data for", nrow(stock_months), "stock-month combinations\n")
 
 # ==============================================================================
-# STEP 2: CONNECT TO WRDS AND GET MARKET CAP + VOLUME
+# 2: CONNECT TO WRDS AND GET MARKET CAP + VOLUME --------------------------
 # ==============================================================================
 
 cat("\n=== Connecting to WRDS ===\n")
@@ -56,9 +56,9 @@ wrds <- dbConnect(
   sslmode = "require"
 )
 
-cat("✅ Connected to WRDS\n")
+cat("Connected to WRDS\n")
 
-# Strategy: Query in batches to avoid overwhelming WRDS
+# Query in batches to avoid overwhelming WRDS
 # We'll get the last 5 years of data (since most recent holdings matter most)
 
 recent_portfolio <- portfolio[trade_month >= (max(trade_month) - years(5))]
@@ -96,7 +96,7 @@ max(recent_portfolio$trade_month)
 market_data <- dbGetQuery(wrds, query)
 setDT(market_data)
 
-cat("✅ Retrieved", nrow(market_data), "monthly observations\n")
+cat("Retrieved", nrow(market_data), "monthly observations\n")
 
 # Calculate average daily volume (ADV) and dollar volume
 # For monthly data, we approximate ADV = monthly_vol / 21
@@ -107,7 +107,7 @@ market_data[, dollar_vol_daily := abs_prc * adv]
 market_data[, trade_month := floor_date(as.Date(date), "month")]
 
 # ==============================================================================
-# STEP 3: MERGE MARKET DATA WITH PORTFOLIO
+# 3: MERGE MARKET DATA WITH PORTFOLIO -------------------------------------
 # ==============================================================================
 
 cat("\n=== Merging Market Data ===\n")
@@ -121,7 +121,7 @@ portfolio_with_liquidity <- merge(
 )
 
 # ==============================================================================
-# STEP 4: CALCULATE TRADEABILITY METRICS
+# 4: CALCULATE TRADEABILITY METRICS ---------------------------------------
 # ==============================================================================
 
 cat("\n=== Calculating Tradeability Metrics ===\n")
@@ -132,7 +132,7 @@ PORTFOLIO_SIZE_MM <- 100
 portfolio_with_liquidity[, position_size_mm := abs(net_weight) * PORTFOLIO_SIZE_MM]
 
 # Days to trade: How many days would it take to build this position 
-# if we use 10% of ADV?
+# if we use 10% of ADV
 ADV_USAGE_PCT <- 0.10
 
 portfolio_with_liquidity[, shares_needed := position_size_mm * 1000000 / abs_prc]
@@ -154,7 +154,7 @@ portfolio_with_liquidity[, cap_category := case_when(
 )]
 
 # ==============================================================================
-# STEP 5: SUMMARY STATISTICS
+# 5: SUMMARIZE TRADEABILITY ------------------------------------------------
 # ==============================================================================
 
 cat("\n=== Tradeability Summary ===\n\n")
@@ -199,7 +199,7 @@ cat("\n--- Recent Months ---\n")
 print(tail(monthly_liquidity, 12))
 
 # ==============================================================================
-# STEP 6: VISUALIZATIONS
+# 6: VISUALIZE LIQUIDITY AND MARKET CAP DISTRIBUTIONS ----------------------
 # ==============================================================================
 
 cat("\n=== Generating Liquidity Visualizations ===\n")
@@ -326,10 +326,10 @@ print(p6)
 
 dev.off()
 
-cat("✅ Liquidity analysis PDF saved\n")
+cat("Liquidity analysis PDF saved\n")
 
 # ==============================================================================
-# STEP 7: IDENTIFY PROBLEMATIC POSITIONS
+# 7: IDENTIFY PROBLEMATIC POSITIONS ---------------------------------------
 # ==============================================================================
 
 cat("\n=== Identifying Problematic Positions ===\n")
@@ -355,7 +355,7 @@ cat("\n--- Top 20 Most Illiquid Positions (", as.character(latest_month), ") ---
 print(very_illiquid)
 
 # ==============================================================================
-# STEP 8: ENHANCED TRADEABILITY SCORE
+# 8: CALCULATE ENHANCED TRADEABILITY SCORE --------------------------------
 # ==============================================================================
 
 cat("\n=== Calculating Enhanced Tradeability Score ===\n")
@@ -389,11 +389,11 @@ enhanced_summary <- portfolio_with_liquidity[!is.na(enhanced_trade_score), .(
   pct_problematic = mean(enhanced_trade_score <= 5)
 ), by = trade_month]
 
-cat("\n--- Enhanced Tradeability Scores (Recent) ---\n")
+cat("\n--- Enhanced Tradeability Scores  ---\n")
 print(tail(enhanced_summary, 12))
 
 # ==============================================================================
-# STEP 9: SAVE ENHANCED DATA
+# 9: SAVE ENHANCED DATA ---------------------------------------------------
 # ==============================================================================
 
 write_parquet(
@@ -424,12 +424,12 @@ dbDisconnect(wrds)
 
 cat("\n=== ENHANCED ANALYSIS COMPLETE ===\n")
 cat("\nKey Findings:\n")
-cat("  • Average days to trade:", round(mean(portfolio_with_liquidity$days_to_trade, na.rm = TRUE), 1), "days\n")
-cat("  • % Illiquid positions:", percent(mean(portfolio_with_liquidity$is_illiquid, na.rm = TRUE)), "\n")
-cat("  • % Large cap:", percent(mean(portfolio_with_liquidity$is_large_cap, na.rm = TRUE)), "\n")
-cat("  • Average enhanced score:", round(mean(portfolio_with_liquidity$enhanced_trade_score, na.rm = TRUE), 1), "/ 12\n")
+cat("   Average days to trade:", round(mean(portfolio_with_liquidity$days_to_trade, na.rm = TRUE), 1), "days\n")
+cat("   % Illiquid positions:", percent(mean(portfolio_with_liquidity$is_illiquid, na.rm = TRUE)), "\n")
+cat("   % Large cap:", percent(mean(portfolio_with_liquidity$is_large_cap, na.rm = TRUE)), "\n")
+cat("   Average enhanced score:", round(mean(portfolio_with_liquidity$enhanced_trade_score, na.rm = TRUE), 1), "/ 12\n")
 
-cat("\n📁 Files created:\n")
+cat("\n Files created:\n")
 cat("  1. Liquidity_Analysis.pdf - Visual analysis\n")
 cat("  2. portfolio_with_full_liquidity_data.parquet - Full dataset\n")
 cat("  3. tradeable_positions_ranked_[DATE].csv - Ranked by tradeability\n")
