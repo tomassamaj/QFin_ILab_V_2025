@@ -51,6 +51,17 @@ OUTPUT_TABLE <- "03_Outputs/Tables"
 dir.create(OUTPUT_DIR, showWarnings = FALSE, recursive = TRUE)
 dir.create(OUTPUT_TABLE, showWarnings = FALSE, recursive = TRUE)
 
+# --- CANONICAL COLOR PALETTE ---
+# All plots use these to ensure cross-plot consistency
+COL_FACTOR_MOM   <- "#1565C0"  # Factor Momentum LS (canonical blue)
+COL_FACTOR_LO    <- "#42A5F5"  # Factor Momentum LO (lighter blue)
+COL_INDUSTRY_MOM <- "#E53935"  # Industry Momentum (canonical red)
+COL_MARKET       <- "#424242"  # Market / Mkt-RF (dark gray)
+COL_LS_LONG      <- "#2ca02c"  # Long leg (green)
+COL_LS_SHORT     <- "#d62728"  # Short leg / inverted (dark red)
+COL_VOLSCALE_LO  <- "#2e7d32"  # LO raw (dark green)
+COL_VOLSCALE_LO2 <- "#66bb6a"  # LO vol-scaled (light green)
+
 START_DATE <- as.Date("1963-01-01") # Analysis start date
 HOLDING_DAYS <- 21 # Monthly rebalancing (fixed)
 IMPL_LAG <- 1 # 1-day implementation lag
@@ -1114,10 +1125,10 @@ focused_start <- tibble(
 focused_plot <- bind_rows(focused_start, focused_cum) %>% arrange(Series, date)
 
 focused_colors <- c(
-  "Market (Mkt-RF)" = "black",
-  "Industry Momentum" = "gray50",
-  "LS Median (1M)" = "#e31a1c",
-  "LO Top-25% (1M)" = "#1f78b4"
+  "Market (Mkt-RF)"  = COL_MARKET,
+  "Industry Momentum"= COL_INDUSTRY_MOM,
+  "LS Median (1M)"   = COL_FACTOR_MOM,
+  "LO Top-25% (1M)"  = COL_FACTOR_LO
 )
 focused_linetypes <- c(
   "Market (Mkt-RF)" = "dotted",
@@ -1216,9 +1227,9 @@ arnott_start <- tibble(
 arnott_plot <- bind_rows(arnott_start, arnott_cum) %>% arrange(Series, date)
 
 arnott_colors <- c(
-  "Factor Momentum (LS Median, 1M)" = "#1565C0",
-  "Industry Momentum (LS Median, 1M)" = "#E53935",
-  "Market (Mkt-RF)" = "#424242"
+  "Factor Momentum (LS Median, 1M)"   = COL_FACTOR_MOM,
+  "Industry Momentum (LS Median, 1M)" = COL_INDUSTRY_MOM,
+  "Market (Mkt-RF)"                   = COL_MARKET
 )
 arnott_ltypes <- c(
   "Factor Momentum (LS Median, 1M)" = "solid",
@@ -1339,10 +1350,10 @@ arnott_compare_plot <- bind_rows(arnott_compare_start, arnott_compare) |>
   arrange(Series, date)
 
 arnott_exact_colors <- c(
-  "Factor Mom \u2013 1-Day Lag (Arnott)" = "#1565C0",
-  "Factor Mom \u2013 2-Day Lag (Ours)" = "#42A5F5",
-  "Industry Momentum" = "#E53935",
-  "Market (Mkt-RF)" = "#424242"
+  "Factor Mom \u2013 1-Day Lag (Arnott)" = COL_FACTOR_MOM,
+  "Factor Mom \u2013 2-Day Lag (Ours)"   = COL_FACTOR_LO,
+  "Industry Momentum"                    = COL_INDUSTRY_MOM,
+  "Market (Mkt-RF)"                      = COL_MARKET
 )
 arnott_exact_ltypes <- c(
   "Factor Mom \u2013 1-Day Lag (Arnott)" = "solid",
@@ -1578,7 +1589,7 @@ p_spaghetti <- ggplot(
   factor_cumulative,
   aes(x = date, y = cum_wealth, group = factor_name)
 ) +
-  geom_line(alpha = 0.35, linewidth = 0.4, color = "steelblue") +
+  geom_line(alpha = 0.35, linewidth = 0.4, color = COL_FACTOR_MOM) +
   scale_y_log10(
     labels = scales::comma_format(accuracy = 0.1),
     breaks = c(0.1, 0.5, 1, 2, 5, 10, 20, 50)
@@ -1654,9 +1665,9 @@ if (nrow(ls_decomp_raw) > 0) {
     ungroup()
 
   ls_leg_colors <- c(
-    "Long Leg"             = "#2ca02c",
-    "Short Leg (inverted)" = "#d62728",
-    "Long\u2013Short"      = "#1f77b4"
+    "Long Leg"             = COL_LS_LONG,
+    "Short Leg (inverted)" = COL_LS_SHORT,
+    "Long\u2013Short"      = COL_FACTOR_MOM
   )
 
   p_ls_decomp <- ggplot(
@@ -1735,10 +1746,10 @@ if (length(dd_series_list) > 0) {
   })
 
   dd_colors <- c(
-    "Factor Mom (LS Median 1M)"   = "#e31a1c",
-    "Factor Mom (LO Top-25% 1M)"  = "#1f78b4",
-    "Industry Momentum"           = "gray50",
-    "Market (Mkt-RF)"             = "black"
+    "Factor Mom (LS Median 1M)"   = COL_FACTOR_MOM,
+    "Factor Mom (LO Top-25% 1M)"  = COL_FACTOR_LO,
+    "Industry Momentum"           = COL_INDUSTRY_MOM,
+    "Market (Mkt-RF)"             = COL_MARKET
   )
 
   p_drawdown <- ggplot(dd_df, aes(x = date, y = drawdown, color = Series)) +
@@ -1814,9 +1825,9 @@ if (length(subperiod_series) > 0) {
   print(sub_metrics)
 
   sub_colors <- c(
-    "Factor Mom (LS Median 1M)" = "#1565C0",
-    "Industry Momentum"         = "#E53935",
-    "Market (Mkt-RF)"           = "#424242"
+    "Factor Mom (LS Median 1M)" = COL_FACTOR_MOM,
+    "Industry Momentum"         = COL_INDUSTRY_MOM,
+    "Market (Mkt-RF)"           = COL_MARKET
   )
 
   p_subperiod <- ggplot(sub_cum, aes(x = date, y = cum_wealth, color = Series)) +
@@ -1903,10 +1914,10 @@ if (length(vs_list) > 0) {
     ungroup()
 
   vs_colors <- c(
-    "LS_Median_1M (Raw)"         = "#d62728",
-    "LS_Median_1M (Vol-Scaled)"  = "#ff7f0e",
-    "LO_25_1M (Raw)"             = "#1f77b4",
-    "LO_25_1M (Vol-Scaled)"      = "#17becf"
+    "LS_Median_1M (Raw)"         = COL_FACTOR_MOM,
+    "LS_Median_1M (Vol-Scaled)"  = COL_FACTOR_LO,
+    "LO_25_1M (Raw)"             = COL_VOLSCALE_LO,
+    "LO_25_1M (Vol-Scaled)"      = COL_VOLSCALE_LO2
   )
 
   p_volscale <- ggplot(vs_df, aes(x = date, y = cum_wealth, color = type)) +
@@ -2069,9 +2080,9 @@ if (nrow(pca_input) >= 36 && ncol(pca_input) >= 4) {
   scree_df <- tibble(PC = seq_along(var_exp), VarExp = var_exp, CumVar = cum_var)
 
   p_scree <- ggplot(scree_df %>% head(min(20, nrow(scree_df))), aes(x = PC, y = VarExp)) +
-    geom_col(fill = "#1f78b4", alpha = 0.8) +
-    geom_line(aes(y = CumVar), color = "#e31a1c", linewidth = 1) +
-    geom_point(aes(y = CumVar), color = "#e31a1c", size = 2) +
+    geom_col(fill = COL_FACTOR_MOM, alpha = 0.8) +
+    geom_line(aes(y = CumVar), color = COL_INDUSTRY_MOM, linewidth = 1) +
+    geom_point(aes(y = CumVar), color = COL_INDUSTRY_MOM, size = 2) +
     geom_hline(yintercept = 0.80, linetype = "dashed", color = "gray40") +
     scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
     labs(
@@ -2139,7 +2150,7 @@ if (nrow(pca_input) >= 36 && ncol(pca_input) >= 4) {
       ungroup()
 
     pca_colors <- setNames(
-      c("#1565C0", "#e65100"),
+      c(COL_FACTOR_MOM, "#e65100"),
       c("All Factors (LS Median 1M)", paste0("PCA Momentum (Top ", n_pcs_80, " PCs)"))
     )
 

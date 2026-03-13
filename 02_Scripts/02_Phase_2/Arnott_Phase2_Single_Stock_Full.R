@@ -835,6 +835,42 @@ p8_cum <- ggplot(plot_dt_8, aes(x = eom, y = CumRet, color = Strategy)) +
   theme(legend.position = "bottom", panel.grid.minor.y = element_blank())
 print(p8_cum)
 ggsave(file.path(OUTPUT_FIG, "phase2_cumret_vs_market.png"), p8_cum, width = 10, height = 6)
+
+# --- PerformanceAnalytics summary (Standard vs Lagged) ---
+charts.PerformanceSummary(
+  xts_master,
+  main     = "Arnott Factor Momentum: Standard vs. Lagged",
+  colorset = c("black", "red")
+)
+
+# --- Formatted comparison table: strategy vs. market ---
+ff_raw_8pm <- download_french_data("Fama/French 3 Factors [Daily]")
+ff_daily_8pm <- as.data.table(ff_raw_8pm$subsets$data[[1]])
+if ("...1" %in% names(ff_daily_8pm)) setnames(ff_daily_8pm, "...1", "date")
+ff_daily_8pm[, eom := ymd(date)]
+ff_daily_8pm[, mkt_exc := `Mkt-RF` / 100]
+ff_clean_8pm <- ff_daily_8pm[
+  eom >= START_DATE & eom <= max(perf_ts$eom), .(eom, mkt_exc)
+]
+
+perf_ts_filt8 <- perf_ts[eom >= START_DATE & eom <= max(perf_ts$eom)]
+
+mkt_ann_ret8  <- mean(ff_clean_8pm$mkt_exc, na.rm = TRUE) * 252
+mkt_ann_vol8  <- sd(ff_clean_8pm$mkt_exc,   na.rm = TRUE) * sqrt(252)
+mkt_sharpe8   <- mkt_ann_ret8 / mkt_ann_vol8
+
+strat_ann_ret8 <- mean(perf_ts_filt8$ret_gross_lagged, na.rm = TRUE) * 12
+strat_ann_vol8 <- sd(perf_ts_filt8$ret_gross_lagged,   na.rm = TRUE) * sqrt(12)
+strat_sharpe8  <- strat_ann_ret8 / strat_ann_vol8
+
+perf_summary8 <- data.frame(
+  Portfolio      = c("Gross (Lagged)", "Excess Market (Mkt-RF)"),
+  Ann_Return     = scales::percent(c(strat_ann_ret8, mkt_ann_ret8), accuracy = 0.01),
+  Ann_Volatility = scales::percent(c(strat_ann_vol8, mkt_ann_vol8), accuracy = 0.01),
+  Sharpe_Ratio   = round(c(strat_sharpe8, mkt_sharpe8), 2)
+)
+cat("\n=== PERFORMANCE COMPARISON: STRATEGY vs. MARKET ===\n")
+print(perf_summary8)
 cat("\n")
 
 
