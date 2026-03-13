@@ -1,7 +1,7 @@
 # ==============================================================================
-# BOTTOM-UP AUDIT: DAILY DATA → MONTHLY FACTOR RETURNS
+# DAILY DATA → MONTHLY FACTOR RETURNS
 # ==============================================================================
-# Purpose: Verify that daily portfolio sorts correctly replicate monthly benchmarks
+# Verify that daily portfolio sorts correctly replicate monthly benchmarks
 # Flow: Daily PFS → Monthly Aggregation → Compare with Official Monthly Index
 # ==============================================================================
 
@@ -146,7 +146,7 @@ cat("Median Correlation:", round(median(audit_stats_corrected$correlation, na.rm
 cat("Min Correlation:", round(min(audit_stats_corrected$correlation, na.rm = TRUE), 5), "\n")
 
 # ==============================================================================
-# STEP 7: GENERATE PDF AUDIT REPORT
+# STEP 7: PDF REPORT
 # ==============================================================================
 
 cat("\n=== Generating PDF Report ===\n")
@@ -174,7 +174,7 @@ summary_text <- paste0(
   "Minimum Correlation: ", round(min(audit_stats_corrected$correlation, na.rm = TRUE), 5), "\n",
   "Factors Flipped: ", length(factors_to_flip), "\n\n",
   "Method: Daily portfolio sorts compounded to monthly\n",
-  "Status: ", ifelse(mean(audit_stats_corrected$correlation) > 0.95, "✅ PASSED", "⚠️ REVIEW")
+  "Status: ", ifelse(mean(audit_stats_corrected$correlation) > 0.95, "PASSED", "REVIEW")
 )
 
 grid.text(summary_text, x = 0.5, y = 0.6, gp = gpar(fontsize = 14))
@@ -196,7 +196,7 @@ pushViewport(viewport(layout = grid.layout(2, 2, heights = c(0.6, 0.4))))
 print(p_corr, vp = viewport(layout.pos.row = 2, layout.pos.col = 1))
 print(p_te, vp = viewport(layout.pos.row = 2, layout.pos.col = 2))
 
-# --- PAGES 2+: INDIVIDUAL FACTOR PLOTS ---
+# --- INDIVIDUAL FACTOR PLOTS ---
 factors_to_plot <- unique(comparison_corrected$characteristic)
 
 for (f in factors_to_plot) {
@@ -240,7 +240,7 @@ for (f in factors_to_plot) {
 
 dev.off()
 
-cat("✅ Audit report saved to:", AUDIT_REPORT, "\n")
+cat("Audit report saved to:", AUDIT_REPORT, "\n")
 
 # ==============================================================================
 # STEP 8: SAVE CORRECTED MONTHLY FACTORS
@@ -253,7 +253,7 @@ OUTPUT_FILE <- file.path(
 
 write_parquet(monthly_factors, OUTPUT_FILE)
 
-cat("\n✅ Corrected monthly factor returns saved to:\n", OUTPUT_FILE, "\n")
+cat("\n Corrected monthly factor returns saved to:\n", OUTPUT_FILE, "\n")
 
 # ==============================================================================
 # STEP 9: CREATE SIGN CORRECTION REFERENCE
@@ -270,5 +270,5 @@ write_csv(
   file.path(BASE_DIR, "01_Data/Processed/factor_sign_corrections.csv")
 )
 
-cat("\n✅ Sign correction reference saved\n")
+cat("\n Sign correction reference saved\n")
 cat("\n=== AUDIT COMPLETE ===\n")
