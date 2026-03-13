@@ -41,9 +41,8 @@ pacman::p_load(
   RPostgres, DBI
 )
 
-setwd(
-  "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code"
-)
+BASE_DIR <- "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code"
+setwd(BASE_DIR)
 
 # --- PATHS ---
 CLEAN_DIR    <- "01_Data/Clean_Daily_Inputs"
@@ -548,8 +547,7 @@ portfolio_constituents <- merge(
 monthly_portfolio <- portfolio_constituents[, .(
   w_quartile_lo = sum(net_weight * pos_quartile_lo),
   w_median_ls   = sum(net_weight * pos_median_ls)
-), by = .(rebal_date.x, id)]
-setnames(monthly_portfolio, "rebal_date.x", "rebal_date")
+), by = .(rebal_date, id)]
 
 cat("  Portfolio size (latest month):",
     nrow(monthly_portfolio[rebal_date == max(rebal_date)]), "stocks.\n")
