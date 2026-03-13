@@ -9,9 +9,9 @@ pacman::p_load(tidyverse, arrow, lubridate, zoo, data.table, ggplot2, scales)
 
 # --- 1. CONFIGURATION ---
 DATA_DIR <- "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code/01_Data/Clean_Daily_Inputs"
-START_DATE <- as.Date("1960-01-01") # <--- FILTER APPLIED HERE
+START_DATE <- as.Date("1960-01-01") 
 
-# Factors definitions (same as before)
+# Factors definitions 
 factors_to_flip <- c(
   "age",
   "aliq_at",
@@ -232,7 +232,7 @@ setnames(monthly_portfolio, "rebal_date.x", "rebal_date")
 # ------------------------------------------------------------------------------
 cat("--- 4. Backtesting ---\n")
 stock_rets <- read_parquet(file.path(DATA_DIR, "USA_daily_rets.parquet")) %>%
-  filter(date >= START_DATE) %>% # <--- FILTER
+  filter(date >= START_DATE) %>% 
   select(id, date, ret = ret_exc) %>%
   collect()
 setDT(stock_rets)
@@ -292,30 +292,28 @@ stats[, Sharpe := Ann_Ret / Ann_Vol]
 print(stats)
 
 
-# Define output path
+# Output path
 OUTPUT_FILE <- file.path(
   DATA_DIR,
   "final_monthly_strategy_weights_1960.parquet"
 )
 
-# Save the object
+# Save 
 write_parquet(monthly_portfolio, OUTPUT_FILE)
 
-cat("✅ Netted positions saved to:", OUTPUT_FILE, "\n")
-
+cat("Netted positions saved to:", OUTPUT_FILE, "\n")
 
 # ==============================================================================
 # EVENT STUDY: ZOOMING IN ON CRISES
 # ==============================================================================
 
-# Function to plot a specific date range
 plot_event <- function(data, start_date, end_date, event_name) {
   # Filter data
   zoom_data <- data %>%
     filter(date >= as.Date(start_date) & date <= as.Date(end_date)) %>%
     melt(id.vars = "date", measure.vars = c("cum_quartile_lo", "cum_median_ls"))
 
-  # Rebase to 1.0 at start of period for clear comparison
+
   zoom_data[, value := value / first(value), by = variable]
 
   # Plot
@@ -335,24 +333,14 @@ plot_event <- function(data, start_date, end_date, event_name) {
 }
 
 # --- 1. The Dot-Com Crash (2000 - 2002) ---
-# Watch for the "Momentum Crash" where winners suddenly become losers
 plot_event(daily_perf, "1999-01-01", "2002-12-31", "Dot-Com Bubble & Crash")
 
 # --- 2. The COVID-19 Crash (2020) ---
-# Watch for the V-shaped recovery
 plot_event(daily_perf, "2019-06-01", "2021-06-01", "COVID-19 Crash & Rebound")
 
-
-# ==============================================================================
-# FACTOR AUTOPSY: WHAT DID WE HOLD?
-# ==============================================================================
-
-# Function to show top holdings for a specific month
 show_top_factors <- function(target_date) {
-  # Find the closest rebalance date in your signals
   target_month <- floor_date(as.Date(target_date), "month")
 
-  # Filter the 'active_signals' object (generated in previous script)
   holdings <- active_signals %>%
     filter(month == target_month) %>%
     filter(pos_quartile_lo > 0) %>% # Look at Long Only portfolio
@@ -362,22 +350,19 @@ show_top_factors <- function(target_date) {
   print(holdings$characteristic)
 }
 
-# Check Dot-Com Peak (March 2000)
-# Likely holding Tech/Growth/Momentum?
+# Dot-Com Peak (March 2000)
 show_top_factors("2000-03-01")
 
-# Check Dot-Com Bottom (Sept 2002)
-# Did it rotate to Value/Quality?
+# Dot-Com Bottom (Sept 2002)
 show_top_factors("2002-09-01")
 
-# Check COVID Crash (March 2020)
+# COVID Crash (March 2020)
 show_top_factors("2020-03-01")
 
-# Check COVID Recovery (Nov 2020 - Vaccine Announcement)
+# COVID Recovery (Nov 2020: Vaccine Announcement)
 show_top_factors("2020-11-01")
 
-
-# Check specifically for the "Crazy Jump" month in 2020
+# Check for jump in 2020
 daily_perf %>%
   filter(year(date) == 2018) %>%
   group_by(month = floor_date(date, "month")) %>%
@@ -386,7 +371,7 @@ daily_perf %>%
   ) %>%
   mutate(Month_Return_Pct = scales::percent(Month_Return, accuracy = 0.1)) %>%
   print()
-# Check specifically for the "Crazy Jump" month in 2020
+
 daily_perf %>%
   filter(year(date) == 2019) %>%
   group_by(month = floor_date(date, "month")) %>%
@@ -395,7 +380,7 @@ daily_perf %>%
   ) %>%
   mutate(Month_Return_Pct = scales::percent(Month_Return, accuracy = 0.1)) %>%
   print()
-# Check specifically for the "Crazy Jump" month in 2020
+
 daily_perf %>%
   filter(year(date) == 2020) %>%
   group_by(month = floor_date(date, "month")) %>%
@@ -406,12 +391,8 @@ daily_perf %>%
   print()
 
 
-# ==============================================================================
-# FORENSIC AUDIT: DECEMBER 2018 (+20.6% Return)
-# ==============================================================================
-
 # 1. FACTORS: What signals were active?
-# The weights for Dec 2018 trading are determined at end of Nov 2018.
+
 print("--- Active Factors for Dec 2018 Trading ---")
 active_signals %>%
   filter(month == as.Date("2018-11-01")) %>% # Signal generated end of Nov for Dec
@@ -419,8 +400,8 @@ active_signals %>%
   select(characteristic) %>%
   print()
 
-# 2. STOCKS: What companies did we actually own?
-# We look at the portfolio weights for the rebalance date 2018-11-30
+# 2. STOCKS: What companies?
+
 print("--- Top 10 Stock Holdings (Dec 2018) ---")
 
 top_holdings_dec18 <- monthly_portfolio %>%
@@ -431,8 +412,7 @@ top_holdings_dec18 <- monthly_portfolio %>%
 
 print(top_holdings_dec18)
 
-# 3. STOCK PERFORMANCE: How did these specific stocks perform in Dec 2018?
-# We join with the returns file to see if one stock went up 200%
+# 3. STOCK PERFORMANCE: How did these stocks perform in Dec 2018?
 print("--- Performance of Top Holdings in Dec 2018 ---")
 
 audit_dec18 <- top_holdings_dec18 %>%
@@ -448,8 +428,7 @@ audit_dec18 <- top_holdings_dec18 %>%
 print(audit_dec18)
 
 
-# Find the stock with the highest return in Dec 2018
-# regardless of its weight in the portfolio
+# Find the stock with the highest return in Dec 2018 regardless of its weight in the portfolio
 print("--- Searching for Data Errors (Dec 2018) ---")
 
 culprit <- monthly_portfolio %>%

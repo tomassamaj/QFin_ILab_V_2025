@@ -15,7 +15,9 @@ pacman::p_load(
   ggplot2,
   scales,
   gridExtra,
-  grid
+  grid,
+  DBI,
+  RPostgres,
 )
 
 # --- CONFIGURATION ---
@@ -92,7 +94,7 @@ dt_monthly_sig <- dt_factors[,
 dt_weights <- dt_monthly_sig[,
   .(
     characteristic,
-    # Compare signal against cross-section of THAT MONTH
+    # Compare signal against cross-section of that month
     weight_ls = fcase(
       mom_signal >= quantile(mom_signal, 0.50, na.rm = TRUE) ,  1 ,
       mom_signal < quantile(mom_signal, 0.50, na.rm = TRUE)  , -1 ,
@@ -121,10 +123,10 @@ dt_bt <- merge(
 # 1. Remove NAs
 dt_bt <- dt_bt[!is.na(weight_ls)]
 
-# 2. FILTER START DATE (Crucial Step)
+# 2. FILTER START DATE
 dt_bt <- dt_bt[date >= START_DATE]
 
-# 3. Execution Lag (Day 1 Cash Rule)
+# 3. Execution Lag 
 dt_bt[, is_trade_day := date == min(date), by = month]
 dt_bt[is_trade_day == TRUE, weight_ls := 0]
 
@@ -136,7 +138,7 @@ strategy_ts <- dt_bt[,
   by = date
 ][order(date)]
 
-# --- REPORTING (FIXED) ---
+# --- REPORTING ---
 cat("[5/5] Generating Plots...\n")
 xts_ret <- xts(strategy_ts$ret_daily, order.by = strategy_ts$date)
 colnames(xts_ret) <- "FactorMomentum"
@@ -148,10 +150,10 @@ df_plot <- data.frame(
 )
 df_plot$Cumulative <- cumprod(1 + df_plot$Return)
 
-# MANUAL DRAWDOWN CALCULATION (Bypasses library error)
-# Peak = Max value seen so far
+# MANUAL DRAWDOWN CALCULATION
+# Peak 
 df_plot$Peak <- cummax(df_plot$Cumulative)
-# Drawdown = (Current / Peak) - 1
+# Drawdown 
 df_plot$Drawdown <- (df_plot$Cumulative / df_plot$Peak) - 1
 
 # Charts
@@ -176,7 +178,7 @@ print(maxDrawdown(xts_ret))
 
 
 # ==============================================================================
-# 2. STRATEGY GRID SEARCH (FIXED GROUPING + 1963 FILTER)
+# 2. STRATEGY GRID SEARCH 
 # ==============================================================================
 
 # Define Grid
@@ -190,13 +192,12 @@ results_list <- list()
 metrics_df <- data.frame()
 START_DATE <- as.Date("1963-01-01")
 
-# --- FUNCTION DEFINITION ---
 run_strategy_fixed <- function(position_type, top_pct) {
   # Percentile Logic
   long_thresh <- 1 - top_pct
   short_thresh <- top_pct
 
-  # 1. CALCULATE WEIGHTS (The Fix: by = .(month) ONLY)
+  # 1. CALCULATE WEIGHTS
   if (position_type == "long_short") {
     dt_w <- dt_monthly_sig[,
       .(
@@ -208,7 +209,7 @@ run_strategy_fixed <- function(position_type, top_pct) {
         )
       ),
       by = .(month)
-    ] # <--- FIXED: No 'characteristic' here
+    ] 
 
     # Normalize (Sum Abs = 2 -> Scale to 1)
     dt_w[, weight := weight / sum(abs(weight)), by = month]
@@ -224,7 +225,7 @@ run_strategy_fixed <- function(position_type, top_pct) {
         )
       ),
       by = .(month)
-    ] # <--- FIXED
+    ] 
 
     # Normalize (Sum = 1)
     dt_w[, weight := weight / sum(weight, na.rm = TRUE), by = month]
@@ -238,16 +239,15 @@ run_strategy_fixed <- function(position_type, top_pct) {
     dt_w[, .(trade_month, characteristic, weight)],
     by.x = c("month", "characteristic"),
     by.y = c("trade_month", "characteristic"),
-    all.y = TRUE # Inner join is safer for speed
+    all.y = TRUE 
   )
 
   # 3. FILTER DATE & CLEAN
   dt_btest <- dt_btest[!is.na(weight) & weight != 0]
-  dt_btest <- dt_btest[date >= START_DATE] # <--- 1963 FILTER
+  dt_btest <- dt_btest[date >= START_DATE]
 
   # 4. EXECUTION LAG (Day 1 = 0)
   dt_btest[, is_trade_day := date == min(date), by = month]
-  # Keep the rows, but set the weight (and thus return) to 0
   dt_btest[is_trade_day == TRUE, weight := 0]
 
   # 5. AGGREGATE
@@ -276,7 +276,6 @@ for (i in 1:nrow(param_grid)) {
   res <- run_strategy_fixed(param_grid$position_type[i], param_grid$top_pct[i])
   results_list[[i]] <- res
 
-  # Add to summary table
   metrics_df <- rbind(
     metrics_df,
     data.frame(
@@ -293,7 +292,7 @@ for (i in 1:nrow(param_grid)) {
 cat("\n\n=== RESULTS (1963-Present) ===\n")
 print(metrics_df)
 
-# Combine for Plot
+# Combine 
 all_rets <- lapply(results_list, function(item) {
   df <- data.frame(
     Date = index(item$xts),
@@ -315,19 +314,18 @@ ggplot(all_rets, aes(x = Date, y = Cumulative, color = Strategy)) +
 # 3. SINGLE STOCK PORTFOLIO CONSTRUCTION (NETTING)
 # ==============================================================================
 # PURPOSE: Convert Factor-Level Weights -> Single Stock Weights
-# STRATEGY: Long-Only Top 50% (Based on your grid results)
+# STRATEGY: Long-Only Top 50% 
 # ==============================================================================
 
 # --- CONFIGURATION ---
 TARGET_STRATEGY_PCT <- 0.25 # Top 50%
-START_DATE <- as.Date("1963-01-01") # Ensure this matches your backtest start!
+START_DATE <- as.Date("1963-01-01") 
 POSITION_TYPE <- "long_only" # "long_only" or "long_short"
-WEIGHTS_FILE <- file.path(DATA_DIR, "/usa_factor_weights.parquet") # Adjust path if needed!
+WEIGHTS_FILE <- file.path(DATA_DIR, "/usa_factor_weights.parquet") 
 
-# --- 1. RECOVER FACTOR WEIGHTS (FROM BEST STRATEGY) ---
+# --- 1. RECOVER FACTOR WEIGHTS ---
 cat("\n[1/4] Re-generating Factor Weights for Target Strategy...\n")
 
-# Re-run the logic for the specific target strategy to get the factor weights
 long_thresh <- 1 - TARGET_STRATEGY_PCT
 
 if (POSITION_TYPE == "long_only") {
@@ -352,13 +350,11 @@ if (POSITION_TYPE == "long_only") {
 
 # Shift to Trade Month (Signal Jan -> Trade Feb)
 dt_target_weights[, trade_month := month + months(1)]
-dt_target_weights <- dt_target_weights[factor_weight != 0] # Optimization: Drop zero-weight factors
+dt_target_weights <- dt_target_weights[factor_weight != 0] # Drop zero-weight factors
 
 # --- 2. LOAD SINGLE STOCK CONSTITUENTS ---
 cat("[2/4] Loading Single Stock Weights (This may take a moment)...\n")
-# We need to map: Trade Month -> Factor -> Stock -> Weight
-# Note: Ensure 'usa_factor_weights.parquet' exists.
-# If you only have daily pfs, we might need to infer weights, but usually weights are monthly.
+# Trade Month -> Factor -> Stock -> Weight
 
 if (!file.exists(WEIGHTS_FILE)) {
   stop(paste("CRITICAL: Weights file not found at", WEIGHTS_FILE))
@@ -371,16 +367,12 @@ dt_constituents <- read_parquet(WEIGHTS_FILE) %>%
 
 # Ensure dates are Date objects
 dt_constituents[, month := floor_date(eom, "month")]
-# Shift Constituent Data:
-# Weights are usually "end of month" for trading "next month".
-# So 'eom' Jan 31 is the portfolio for Feb.
+
 dt_constituents[, trade_month := floor_date(eom, "month") + months(1)]
 
 # --- 3. EXPLODE & NETTING ---
 cat("[3/4] Exploding Factors to Stocks & Netting Positions...\n")
 
-# Merge: Factor Strategy Weights (dt_target_weights) + Stock Constituents (dt_constituents)
-# Join on: trade_month, characteristic
 dt_portfolio <- merge(
   dt_constituents,
   dt_target_weights[, .(trade_month, characteristic, factor_weight)],
@@ -388,18 +380,13 @@ dt_portfolio <- merge(
   all.y = TRUE # Keep the Strategy Factors
 )
 
-# Filter: We only care about the factors currently in our strategy
+# Filter: Keep only the factors currently in our strategy
 dt_portfolio <- dt_portfolio[!is.na(stock_weight)]
 
 dt_portfolio <- dt_portfolio[trade_month >= START_DATE] # Ensure we only keep relevant dates
-# APPLY SIGN CORRECTIONS TO CONSTITUENTS
-# If a factor was flipped (e.g. Price), we must flip the underlying stock weights too?
-# LOGIC CHECK:
-# If Factor Return = Long - Short, and we flipped it to Short - Long (-1),
-# Then "Buying the Factor" means Buying the Short Leg and Selling the Long Leg.
-# So yes, we multiply stock_weight by the flip sign.
+# Apply sign correction
 
-# 1. Identify Flip Factors
+# 1. Identify Flip Factors (Hardcoded)
 factors_to_flip <- c(
   "betabab_1260d",
   "market_equity",
@@ -431,17 +418,17 @@ dt_portfolio[
   stock_weight := stock_weight * -1
 ]
 
-# CALCULATE FINAL NET WEIGHT
+# Calculate Final Net Weight
 # Net Weight = Sum ( Factor_Weight_in_Strategy * Stock_Weight_in_Factor )
 dt_portfolio[, net_weight := factor_weight * stock_weight]
 
-# AGGREGATE BY STOCK ID
+# Aggregate by Stock ID
 final_stock_portfolio <- dt_portfolio[,
   .(total_weight = sum(net_weight, na.rm = TRUE)),
   by = .(trade_month, id)
 ]
 
-# Clean up: Remove tiny residuals (floating point errors) and zeros
+# Clean up
 final_stock_portfolio <- final_stock_portfolio[abs(total_weight) > 1e-6]
 
 # --- 4. ANALYSIS OF FINAL PORTFOLIO ---
@@ -467,7 +454,7 @@ top_holdings <- final_stock_portfolio[trade_month == latest_date][order(
 print(head(top_holdings))
 print(summary(stats_n_stocks$n_stocks))
 
-# Plot Number of Stocks over time
+# Number of Stocks over time
 ggplot(stats_n_stocks, aes(x = trade_month, y = n_stocks)) +
   geom_area(fill = "#2980b9", alpha = 0.6) +
   labs(
@@ -477,7 +464,7 @@ ggplot(stats_n_stocks, aes(x = trade_month, y = n_stocks)) +
   ) +
   theme_minimal()
 
-# OPTIONAL: SAVE TO PARQUET FOR EXECUTION
+
 write_parquet(
   final_stock_portfolio,
   file.path(DATA_DIR, "final_strategy_single_stocks.parquet")
@@ -486,14 +473,8 @@ cat("\nDone! 'final_stock_portfolio' contains the trade list.\n")
 
 
 # ==============================================================================
-# 4. ENRICH PORTFOLIO WITH WRDS METADATA (TICKERS & NAMES) - LOCAL JOIN FIX
+# 4. PORTFOLIO WITH WRDS METADATA (TICKERS & NAMES) 
 # ==============================================================================
-
-# --- LIBRARIES ---
-if (!require("pacman")) {
-  install.packages("pacman")
-}
-pacman::p_load(tidyverse, data.table, DBI, RPostgres, arrow)
 
 # --- 1. CONNECT TO WRDS ---
 cat("\n[1/4] Connecting to WRDS...\n")
@@ -512,23 +493,17 @@ wrds <- tryCatch(
   },
   error = function(e) {
     stop(
-      "Failed to connect to WRDS. Check your internet connection and credentials."
+      "Failed to connect to WRDS."
     )
   }
 )
 
 # --- 2. FETCH NAMES (CRSP.MSENAMES) ---
-cat("[2/4] Querying CRSP Names & Tickers (Download & Local Filter)...\n")
-
-# STRATEGY CHANGE: Instead of uploading a temp table (which failed),
-# we download the relevant columns from msenames and filter locally.
-# msenames is relatively small, so this is safe.
+cat("[2/4] Querying CRSP Names & Tickers\n")
 
 # Extract unique PERMNOs from your portfolio
 unique_permnos <- unique(final_stock_portfolio$id)
 
-# Query: Get all names.
-# Optimization: If the table is too big, we can filter by date at least.
 names_query <- tbl(
   wrds,
   sql(
@@ -539,13 +514,13 @@ names_query <- tbl(
 # Download to R
 df_names <- names_query %>% collect() %>% setDT()
 
-# Disconnect immediately
+# Disconnect 
 dbDisconnect(wrds)
 
 # --- 3. FILTER LOCALLY ---
 cat("[3/4] Filtering and Merging Metadata...\n")
 
-# Filter for only the PERMNOs in our portfolio
+# Filter for only the PERMNOs in portfolio
 df_names <- df_names[permno %in% unique_permnos]
 
 # Ensure dates are proper Date objects
@@ -553,7 +528,6 @@ df_names[, namedt := as.Date(namedt)]
 df_names[, nameendt := as.Date(nameendt)]
 final_stock_portfolio[, trade_month := as.Date(trade_month)]
 
-# Perform Non-Equi Join (Range Join)
 # Logic: Stock ID matches PERMNO, and Trade Month falls between Name Start/End dates
 dt_enriched <- df_names[
   final_stock_portfolio,
@@ -592,25 +566,9 @@ write_parquet(dt_enriched, OUTPUT_FILE)
 
 cat(sprintf("\nSUCCESS! Saved to: %s\n", OUTPUT_FILE))
 
-
 # ==============================================================================
 # 6. MONTHLY BACKTEST (WITH OUTLIER CLEANING)
 # ==============================================================================
-
-# --- LIBRARIES ---
-if (!require("pacman")) {
-  install.packages("pacman")
-}
-pacman::p_load(
-  tidyverse,
-  data.table,
-  arrow,
-  lubridate,
-  ggplot2,
-  PerformanceAnalytics,
-  scales,
-  gridExtra
-)
 
 # --- CONFIGURATION ---
 DATA_DIR <- "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code/01_Data/Clean_Daily_Inputs"
@@ -643,7 +601,6 @@ dt_rets <- read_parquet(RETURNS_FILE) %>%
 
 dt_rets[, join_month := floor_date(eom, "month")]
 
-# --- 2. DIAGNOSTIC: FIND THE "DATA BOMBS" ---
 cat("[2/5] Inspecting Data Quality...\n")
 # Look for returns > 1000% (10.0)
 bombs <- dt_rets[ret > 10.0]
@@ -655,10 +612,9 @@ if (nrow(bombs) > 0) {
   print(head(bombs[order(-ret)], 5))
 }
 
-# --- 3. CLEANING (CRITICAL FIX) ---
+# --- 3. CLEANING ---
 cat("[3/5] Cleaning Extreme Outliers...\n")
 # We clip monthly returns at +300% (3.0) and -95% (-0.95).
-# This is standard practice to prevent penny stock errors from ruining equal-weighted backtests.
 initial_count <- nrow(dt_rets)
 dt_rets <- dt_rets[ret < 10.0 & ret > -10.0]
 removed <- initial_count - nrow(dt_rets)
@@ -674,18 +630,18 @@ run_monthly_backtest <- function(threshold_bps) {
     return(NULL)
   }
 
-  # B. Merge (Inner Join to ensure we only have tradable assets)
+  # B. Merge 
   # We assume we rebalance monthly.
   dt_bt <- merge(
     dt_trim[, .(permno, join_month, weight)],
     dt_rets[, .(id, join_month, ret)],
     by.x = c("permno", "join_month"),
     by.y = c("id", "join_month"),
-    all.x = FALSE, # INNER JOIN: Drop stocks with missing returns
+    all.x = FALSE, 
     all.y = FALSE
   )
 
-  # C. Daily Re-Normalization (The "100% Invested" Logic)
+  # C. Daily Re-Normalization 
   # 1. Sum the weights of the stocks we actually found returns for
   ts_monthly <- dt_bt[,
     .(
@@ -696,8 +652,6 @@ run_monthly_backtest <- function(threshold_bps) {
   ]
 
   # 2. Filter out months with bad data coverage
-  # If we found less than 50% of our target portfolio, skip the month (or treat as cash)
-  # Here we re-scale: Return = Raw_Ret / Total_Weight
   ts_monthly <- ts_monthly[total_found_weight > 0.5]
 
   ts_monthly[, ret := raw_weighted_ret / total_found_weight]
@@ -774,8 +728,6 @@ ret_daily_cutoffs <- read_parquet(file.path(
   "return_cutoffs_daily.parquet"
 ))
 
-
-# do str and head on the cutoffs with lapply
 cat("\n--- NYSE Cutoffs ---\n")
 print(str(nyse))
 print(head(nyse))
@@ -791,23 +743,8 @@ print(head(ret_daily_cutoffs))
 # ==============================================================================
 # 8. DAILY BACKTEST WITH DYNAMIC JKP CUTOFFS
 # ==============================================================================
-# PURPOSE: Use official JKP cutoffs to clean daily returns and filter microcaps.
+# Use official JKP cutoffs to clean daily returns and filter microcaps.
 # ==============================================================================
-
-# --- LIBRARIES ---
-if (!require("pacman")) {
-  install.packages("pacman")
-}
-pacman::p_load(
-  tidyverse,
-  data.table,
-  arrow,
-  lubridate,
-  ggplot2,
-  PerformanceAnalytics,
-  scales,
-  gridExtra
-)
 
 # --- CONFIGURATION ---
 DATA_DIR <- "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code/01_Data/Clean_Daily_Inputs"
@@ -831,11 +768,8 @@ cat("[2/6] Loading Cutoff Definitions...\n")
 dt_limits_daily <- read_parquet(DAILY_CUTOFFS) %>% setDT()
 dt_limits_nyse <- read_parquet(NYSE_CUTOFFS) %>% setDT()
 
-# Prepare Daily Limits for Merge (Year-Month Key)
-# The file has 'year' and 'month' columns. We need to match daily returns to this.
-# (No processing needed, we will create year/month in returns)
 
-# --- 3. LOAD & CLEAN DAILY RETURNS (THE FIX) ---
+# --- 3. LOAD & CLEAN DAILY RETURNS ---
 cat("[3/6] Loading & Cleaning Daily Returns...\n")
 unique_permnos <- unique(dt_port$permno)
 
@@ -849,7 +783,7 @@ dt_rets <- read_parquet(STOCK_RET_FILE) %>%
 dt_rets[, year := year(date)]
 dt_rets[, month := month(date)]
 
-# MERGE 1: Attach Dynamic Return Limits (0.1% and 99.9%)
+# Attach Dynamic Return Limits (0.1% and 99.9%)
 dt_rets <- merge(
   dt_rets,
   dt_limits_daily[, .(
@@ -863,8 +797,6 @@ dt_rets <- merge(
 )
 
 # FILTER 1: Dynamic Outlier Removal
-# We keep only returns that are within the historical 0.1% - 99.9% band
-# This handles the "1929 Volatility" differently than "2010 Volatility"
 initial_N <- nrow(dt_rets)
 dt_rets <- dt_rets[ret >= min_ret & ret <= max_ret]
 cat(sprintf(
@@ -872,10 +804,7 @@ cat(sprintf(
   initial_N - nrow(dt_rets)
 ))
 
-# MERGE 2: NYSE Size Filter (Optional but Recommended)
-# Arnott et al use NYSE breakpoints. We can filter stocks smaller than NYSE 20th percentile.
-# Note: We need Market Cap (me) for this. If daily 'me' is missing, skip or load monthly me.
-# Assuming we proceed with just Return Cleaning for now.
+# MERGE 2: NYSE Size Filter 
 
 # --- 4. ROBUST BACKTEST FUNCTION (DAILY RE-NORMALIZATION) ---
 run_cleaned_backtest <- function(threshold_bps) {
@@ -900,7 +829,7 @@ run_cleaned_backtest <- function(threshold_bps) {
     by.y = "permno",
     all.x = FALSE,
     all.y = FALSE,
-    allow.cartesian = TRUE # Safe now because we filter by month next
+    allow.cartesian = TRUE 
   )
 
   # Ensure Date matches Trade Month
@@ -983,25 +912,9 @@ if (nrow(df_compare) > 0) {
   cat("No valid data generated.\n")
 }
 
-
 # ==============================================================================
-# 9. GOLD STANDARD MONTHLY BACKTEST (CORRECTED)
+# 9. GOLD STANDARD MONTHLY BACKTEST 
 # ==============================================================================
-
-# --- LIBRARIES ---
-if (!require("pacman")) {
-  install.packages("pacman")
-}
-pacman::p_load(
-  tidyverse,
-  data.table,
-  arrow,
-  lubridate,
-  ggplot2,
-  PerformanceAnalytics,
-  scales,
-  gridExtra
-)
 
 # --- CONFIGURATION ---
 DATA_DIR <- "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code/01_Data/Clean_Daily_Inputs"
@@ -1034,7 +947,6 @@ dt_rets <- read_parquet(RETURNS_FILE) %>%
 
 dt_rets[, join_month := floor_date(eom, "month")]
 
-# *** CRITICAL FIX: LAG MARKET CAP ***
 setorder(dt_rets, id, join_month)
 dt_rets[, me_lag := shift(me, 1, type = "lag"), by = id]
 
@@ -1065,7 +977,7 @@ cat(sprintf(
 run_vw_backtest <- function(threshold_bps, name) {
   threshold <- threshold_bps / 10000
 
-  # A. Filter Portfolio Signal (Remove weak factor signals)
+  # A. Filter Portfolio Signal 
   dt_trim <- dt_port[abs(weight) >= threshold]
   if (nrow(dt_trim) == 0) {
     return(NULL)
@@ -1082,7 +994,6 @@ run_vw_backtest <- function(threshold_bps, name) {
   )
 
   # C. Calculate Value Weights (Split by Long/Short)
-  # Weight = (LaggedCap / TotalLaggedCap of Leg)
   dt_bt[, leg_cap := sum(me_lag, na.rm = TRUE), by = .(join_month, signal_sign)]
   dt_bt[, vw_weight := (me_lag / leg_cap) * signal_sign]
 

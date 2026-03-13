@@ -1,16 +1,16 @@
 # ==============================================================================
 # PHASE 2: SINGLE STOCK WEIGHTS ANALYSIS
-# Focus: Investability, Turnover, and Concentration
+# Investability, Turnover, and Concentration
 # ==============================================================================
 
 # --- LIBRARIES ---
 if (!require("pacman")) {
   install.packages("pacman")
 }
-pacman::p_load(arrow, tidyverse, data.table, lubridate, scales, gridExtra)
+pacman::p_load(arrow, tidyverse, data.table, lubridate, scales, gridExtra, PerformanceAnalytics, viridis)
+
 
 # --- CONFIGURATION ---
-# UPDATE THIS PATH to where you saved the file locally
 FILE_PATH <- "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code/01_Data/Clean_Daily_Inputs/arnott_stock_weights.parquet"
 
 # --- 1. LOAD DATA ---
@@ -21,11 +21,10 @@ dt <- read_parquet(FILE_PATH) %>% as.data.table()
 dt[, eom := as.Date(eom)]
 setorder(dt, eom, id)
 
-# --- 2. SANITY CHECKS (The "Bug Hunt") ---
+# --- 2. SANITY CHECKS ---
 cat("\n--- SANITY CHECKS ---\n")
 
-# Check 1: Gross Exposure (Should be 1.0 or 100%)
-# Logic: sum(abs(weight)) per month
+# Gross Exposure should be 1.0 or 100%
 check_gross <- dt[, .(gross_exp = sum(abs(weight))), by = eom]
 cat(
   "Avg Gross Exposure (Target 1.0): ",
@@ -33,8 +32,7 @@ cat(
   "\n"
 )
 
-# Check 2: Net Exposure (Should be 0.0 for Dollar Neutral)
-# Logic: sum(weight) per month
+# CNet Exposure should be 0.0 for dollar neutral
 check_net <- dt[, .(net_exp = sum(weight)), by = eom]
 cat(
   "Avg Net Exposure (Target 0.0):   ",
@@ -42,14 +40,13 @@ cat(
   "\n"
 )
 
-# Check 3: Missing IDs
+# Missing IDs
 n_ids <- uniqueN(dt$id)
 cat("Total Unique Stocks traded since 1963:", n_ids, "\n")
 
 
-# --- 3. CONCENTRATION ANALYSIS (Risk) ---
+# --- 3. CONCENTRATION ANALYSIS ---
 # How much of the portfolio is in the Top 10 bets?
-# Ideally, this should be < 10% for a diversified factor strategy.
 
 conc_stats <- dt[,
   .(
@@ -76,9 +73,8 @@ p1 <- ggplot(conc_stats, aes(x = eom, y = top10_share)) +
   theme_minimal()
 
 
-# --- 4. TURNOVER ANALYSIS (Transaction Costs) ---
+# --- 4. TURNOVER ANALYSIS ---
 # Calculation: Sum(|w_t - w_{t-1}|) / 2
-# We need to align t with t-1 including stocks that exited or entered (weight = 0)
 
 cat("\nCalculating Turnover (This may take a moment)...\n")
 
@@ -87,14 +83,13 @@ dt_prev <- copy(dt)
 dt_prev[, eom := eom %m+% months(1)] # Shift date forward to match 'next' month
 setnames(dt_prev, "weight", "w_prev")
 
-# Full Join to capture entries and exits
 dt_turnover <- merge(dt, dt_prev, by = c("eom", "id"), all = TRUE)
 
 # Fill NAs with 0 (Entry or Exit)
 dt_turnover[is.na(weight), weight := 0]
 dt_turnover[is.na(w_prev), w_prev := 0]
 
-# Calculate Monthly Turnover (One-Way)
+# Calculate Monthly Turnover 
 monthly_tcost <- dt_turnover[,
   .(
     turnover = sum(abs(weight - w_prev)) / 2
@@ -121,7 +116,7 @@ p2 <- ggplot(monthly_tcost, aes(x = eom, y = turnover)) +
   theme_minimal()
 
 
-# --- 5. POSITION COUNTS (Capacity) ---
+# --- 5. POSITION COUNTS ---
 pos_counts <- dt[,
   .(
     Longs = sum(weight > 0),
@@ -150,7 +145,7 @@ p3 <- ggplot(pos_counts, aes(x = eom, y = Count, fill = Leg)) +
 # --- 6. OUTPUT ---
 grid.arrange(p1, p3, ncol = 1)
 
-# Summary Table for Partners
+# Summary Table 
 summary_table <- data.frame(
   Metric = c(
     "Annualized Turnover",
@@ -172,21 +167,8 @@ print(summary_table)
 
 
 # ==============================================================================
-# PHASE 2: LOCAL BACKTEST MASTER SCRIPT
-# Input: arnott_master.parquet (Weights + Returns + Day1)
+# PHASE 2: LOCAL BACKTEST SCRIPT
 # ==============================================================================
-
-if (!require("pacman")) {
-  install.packages("pacman")
-}
-pacman::p_load(
-  arrow,
-  tidyverse,
-  data.table,
-  lubridate,
-  PerformanceAnalytics,
-  scales
-)
 
 # --- 1. CONFIGURATION ---
 MASTER_FILE <- "/Users/farkastallos/Library/CloudStorage/OneDrive-WUWien/00_WU/01_2_YEAR/07_ILab_ZZ/ILab_Code/01_Data/Clean_Daily_Inputs/arnott_master.parquet" # Update this path!
@@ -197,7 +179,7 @@ dt[, eom := as.Date(eom)]
 
 # --- 3. CALCULATE PORTFOLIO RETURNS ---
 # A. Standard (Trade at Month End Close)
-# B. Lagged (Trade at Next Day Close) -> Approx: Monthly - Day1
+# B. Lagged (Trade at Next Day Close) 
 
 perf_ts <- dt[,
   .(
@@ -205,10 +187,8 @@ perf_ts <- dt[,
     ret_standard = sum(weight * ret_exc_lead1m, na.rm = TRUE),
 
     # Lagged: Sum(Weight * (Monthly_Ret - Day1_Ret))
-    # Logic: We missed the Day 1 return, so we subtract it from the monthly total.
     ret_lagged = sum(weight * (ret_exc_lead1m - ret_day1), na.rm = TRUE),
 
-    # Turnover: Need lag calculation (see below)
     gross_exp = sum(abs(weight))
   ),
   by = eom
@@ -234,7 +214,6 @@ t_cost_ts <- turnover_dt[,
 perf_ts <- merge(perf_ts, t_cost_ts, by = "eom")
 
 # --- 5. REPORTING ---
-# Convert to xts for Analytics
 xts_ret <- xts(perf_ts[, .(ret_standard, ret_lagged)], order.by = perf_ts$eom)
 
 cat("\n=== STRATEGY PERFORMANCE (1963-Present) ===\n")
@@ -256,45 +235,20 @@ charts.PerformanceSummary(
   colorset = c("black", "red")
 )
 
-
 # ==============================================================================
-# PHASE 2: DEEP DIVE INTO WEIGHT BEHAVIOR
-# "Forensics" - Why is turnover 600%? Do we have "Whale" positions?
+# DEEP DIVE INTO WEIGHT BEHAVIOR
 # ==============================================================================
-
-if (!require("pacman")) {
-  install.packages("pacman")
-}
-pacman::p_load(
-  arrow,
-  tidyverse,
-  data.table,
-  lubridate,
-  scales,
-  gridExtra,
-  viridis
-)
-
-# --- CONFIGURATION ---
-# Use the MASTER file if you have it, or the weights file
 
 # --- 1. LOAD & PREP ---
 cat("Loading Data...\n")
 dt <- read_parquet(FILE_PATH) %>% as.data.table()
 dt[, eom := as.Date(eom)]
 
-# --- 2. THE "NETTING EFFICIENCY" CHECK ---
-# This is a sophisticated metric.
-# We are summing many factor bets. Do they cancel out (noise) or reinforce (signal)?
-# Netting Ratio = |Sum(Weights)| / Sum(|Weights|)
-# If Ratio is near 0, factors are fighting each other. If near 1, they agree.
+# --- 2. THE NETTING EFFICIENCY CHECK ---
 
 cat("Calculating Netting Efficiency...\n")
-# Note: Since your file is already netted, we can't calculate the 'Gross' component easily
-# unless we saved the raw inputs.
-# Instead, let's look at the DISTRIBUTION of the final weights.
 
-# --- 3. WEIGHT DISTRIBUTION (Are we diversified?) ---
+# --- 3. WEIGHT DISTRIBUTION ---
 # Filter for non-zero positions
 active_pos <- dt[weight != 0]
 
@@ -307,12 +261,10 @@ p1 <- ggplot(active_pos[eom > "2020-01-01"], aes(x = weight)) +
     x = "Net Weight",
     y = "Count"
   ) +
-  xlim(-0.005, 0.005) # Zoom in on the center (adjust if needed)
+  xlim(-0.005, 0.005) 
 
-# --- 4. THE "FLICKER" TEST (Visualizing Turnover) ---
+# --- 4.Visualizing Turnover ---
 # Pick 4 well-known stocks to see how their weight changes over time.
-# We need specific Permnos/IDs. Since we have 'id' (likely Permno),
-# let's pick the stocks with the largest Cumulative Weight (Big Caps usually).
 
 top_ids <- dt[, .(total_w = sum(abs(weight))), by = id][order(-total_w)][1:4]$id
 
@@ -335,9 +287,8 @@ p2 <- ggplot(
   ) +
   theme(legend.position = "none")
 
-# --- 5. THE "WHALE" DETECTOR ---
+# --- 5. THE WHALE DETECTOR ---
 # Find the absolute maximum weight ever assigned to a single stock.
-# If this is > 5% in a diversified portfolio, it's a bug or a risk.
 
 max_w <- dt[which.max(abs(weight))]
 cat("\n--- EXTREME POSITION CHECK ---\n")
@@ -354,9 +305,8 @@ cat(
 # Top 1% of weights
 cat("99th Percentile Weight:", percent(quantile(abs(dt$weight), 0.99)), "\n")
 
-# --- 6. HEATMAP OF TOP POSITIONS (The "Churn" View) ---
-# Look at the Top 20 stocks by weight for a specific year (e.g., 2023)
-# and see how they enter/exit the "Top 20" list.
+# --- 6. HEATMAP OF TOP POSITIONS ---
+# Look at the Top 20 stocks by weight for a specific year (e.g., 2023) and see how they enter/exit the "Top 20" list.
 
 subset_yr <- dt[year(eom) == 2023]
 # Rank stocks by absolute weight each month
@@ -387,11 +337,10 @@ p3 <- ggplot(
 
 # --- 7. OUTPUT ---
 grid.arrange(p1, p3, ncol = 1)
-print(p2) # Print trace separately as it's tall
-
+print(p2) 
 
 # ==============================================================================
-# PHASE 2 Add-On: DAILY EXCESS MARKET DATA & CUMULATIVE RETURNS (LOG-SCALED)
+# DAILY EXCESS MARKET DATA & CUMULATIVE RETURNS (LOG-SCALED)
 # ==============================================================================
 start_date <- ymd("1963-01-01")
 end_date <- ymd("2024-12-31")
@@ -409,22 +358,19 @@ ff_raw <- download_french_data("Fama/French 3 Factors [Daily]")
 # Extract the daily data subset
 ff_daily <- as.data.table(ff_raw$subsets$data[[1]])
 
-# Fix the unnamed date column (R auto-names it "...1" when missing)
 if ("...1" %in% names(ff_daily)) {
   setnames(ff_daily, "...1", "date")
 }
 
-# Clean dates: Map to 'eom' to seamlessly merge with your existing perf_ts
 ff_daily[, eom := ymd(date)]
 
-# Isolate Excess Market Return (Decimal format)
+# Isolate Excess Market Return 
 ff_daily[, mkt_exc := `Mkt-RF` / 100]
 
 # Filter FF data to the exact specified timeframe
 ff_clean <- ff_daily[eom >= start_date & eom <= end_date, .(eom, mkt_exc)]
 
 # --- 2. MERGE WITH STRATEGY RETURNS ---
-# Ensure perf_ts is a data.table and filter it to match the timeframe BEFORE merging
 setDT(perf_ts)
 perf_ts_filtered <- perf_ts[eom >= start_date & eom <= end_date]
 
@@ -434,7 +380,7 @@ perf_ts_daily <- merge(ff_clean, perf_ts_filtered, by = "eom", all.x = TRUE)
 # Ensure the result stays a data.table
 setDT(perf_ts_daily)
 
-# Handle NAs for non-trading days (keeps cumulative line flat between monthly dates)
+# Handle NAs for non-trading days 
 perf_ts_daily[is.na(mkt_exc), mkt_exc := 0]
 perf_ts_daily[is.na(ret_lagged), ret_lagged := 0]
 
@@ -442,8 +388,8 @@ perf_ts_daily[is.na(ret_lagged), ret_lagged := 0]
 perf_ts_daily[, cum_ret_lagged := cumprod(1 + ret_lagged)]
 perf_ts_daily[, cum_ret_mkt_exc := cumprod(1 + mkt_exc)]
 
-# --- 4. PREPARE DATA FOR GGPLOT ---
-# Only melt the two vectors we want to plot
+# --- 4. PREPARE DATA ---
+
 plot_dt <- melt(
   perf_ts_daily[, .(eom, cum_ret_lagged, cum_ret_mkt_exc)],
   id.vars = "eom",
@@ -451,7 +397,7 @@ plot_dt <- melt(
   value.name = "CumRet"
 )
 
-# CRITICAL FIX: Ensure plot_dt is a data.table after melting
+# Ensure plot_dt is a data.table after melting
 setDT(plot_dt)
 
 # Rename levels for a cleaner legend
@@ -479,8 +425,8 @@ p_cum_ret <- ggplot(plot_dt, aes(x = eom, y = CumRet, color = Strategy)) +
   ) +
   scale_color_manual(
     values = c(
-      "Gross (Lagged)" = "#1F78B4", # Red for the strategy
-      "Excess Market (Mkt-RF)" = "#95a5a6" # Grey for the baseline
+      "Gross (Lagged)" = "#1F78B4", 
+      "Excess Market (Mkt-RF)" = "#95a5a6" 
     )
   ) +
   labs(
@@ -501,7 +447,7 @@ print(p_cum_ret)
 
 
 # ==============================================================================
-# PHASE 2 Add-On: PERFORMANCE STATISTICS
+# PERFORMANCE STATISTICS
 # ==============================================================================
 
 cat(
@@ -513,13 +459,11 @@ cat(
 )
 
 # 1. Market Metrics (Calculated on Daily frequency)
-# Using ff_clean which contains every trading day
 mkt_ann_ret <- mean(ff_clean$mkt_exc, na.rm = TRUE) * 252
 mkt_ann_vol <- sd(ff_clean$mkt_exc, na.rm = TRUE) * sqrt(252)
 mkt_sharpe <- mkt_ann_ret / mkt_ann_vol
 
 # 2. Strategy Metrics (Calculated on Monthly frequency)
-# Using perf_ts_filtered which contains only the month-end actual trading periods
 strat_ann_ret <- mean(perf_ts_filtered$ret_lagged, na.rm = TRUE) * 12
 strat_ann_vol <- sd(perf_ts_filtered$ret_lagged, na.rm = TRUE) * sqrt(12)
 strat_sharpe <- strat_ann_ret / strat_ann_vol
