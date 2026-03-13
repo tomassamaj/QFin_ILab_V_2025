@@ -1121,6 +1121,398 @@ cat("\n")
 
 
 # ==============================================================================
+# 10b. DRIFT-BAND REBALANCING ANALYSIS
+# ==============================================================================
+# Instead of rebalancing every month, only trade a position when the gap between
+# current actual weight and target weight exceeds a threshold (in bps).
+# Tests thresholds: 0, 5, 10, 15, 20, 30, 50 bps.
+# Key finding: saving TCs via a drift band destroys gross alpha faster than it
+# saves costs, because momentum signal is fresh only at month-end.
+# ==============================================================================
+
+cat("=== SECTION 10b: Drift-Band Rebalancing Analysis ===\n")
+
+THRESHOLDS_BPS <- c(0, 5, 10, 15, 20, 30, 50)
+
+# dt_fr already has friction rates attached from Section 10
+simulate_drift_band <- function(dt_all, threshold_bps) {
+  setkey(dt_all, eom)
+  months <- sort(unique(dt_all$eom))
+
+  id_type  <- class(dt_all$id)
+  holdings <- data.table(id = vector(id_type, 0), weight = numeric())
+  results_list <- vector("list", length(months))
+
+  for (i in seq_along(months)) {
+    m          <- months[i]
+    month_data <- dt_all[.(m)]
+
+    month_data <- merge(
+      month_data, holdings,
+      by = "id", all.x = TRUE, sort = FALSE
+    )
+    setnames(month_data, c("weight.x", "weight.y"), c("target", "prev_actual"))
+    month_data[is.na(prev_actual), prev_actual := 0]
+
+    thresh <- threshold_bps / 10000
+    trade  <- abs(month_data$target - month_data$prev_actual) > thresh |
+              month_data$prev_actual == 0
+    month_data[, actual := ifelse(trade, target, prev_actual)]
+
+    port_ret     <- sum(month_data$actual * month_data$ret_exc_lead1m, na.rm = TRUE)
+    port_ret_lag <- sum(
+      month_data$actual * (month_data$ret_exc_lead1m - month_data$ret_day1),
+      na.rm = TRUE
+    )
+    turnover <- sum(abs(month_data$actual - month_data$prev_actual), na.rm = TRUE)
+
+    month_data[,
+      tc_drag_stock := ifelse(
+        trade,
+        2 * (tc_bps / 10000) * abs(target - prev_actual),
+        0
+      )
+    ]
+    tc_drag <- sum(month_data$tc_drag_stock, na.rm = TRUE)
+
+    month_data[,
+      sc_drag_stock := ifelse(
+        actual < 0,
+        abs(actual) * (sc_annual_bps / 10000) / 12,
+        0
+      )
+    ]
+    sc_drag <- sum(month_data$sc_drag_stock, na.rm = TRUE)
+
+    month_data[,
+      tax_drag_stock := ifelse(
+        actual < 0 & div1m_me > 0,
+        abs(actual) * div1m_me * TAX_RATE,
+        0
+      )
+    ]
+    tax_drag <- sum(month_data$tax_drag_stock, na.rm = TRUE)
+
+    results_list[[i]] <- data.table(
+      eom              = m,
+      ret_gross        = port_ret,
+      ret_gross_lagged = port_ret_lag,
+      turnover         = turnover,
+      tc_drag          = tc_drag,
+      sc_drag          = sc_drag,
+      tax_drag         = tax_drag
+    )
+
+    holdings <- month_data[actual != 0, .(id, weight = actual)]
+  }
+  rbindlist(results_list)
+}
+
+cat("  Running drift-band simulations...\n")
+drift_results_list <- list()
+for (th in THRESHOLDS_BPS) {
+  cat(sprintf("    Threshold = %d bps ...\n", th))
+  drift_results_list[[as.character(th)]] <- simulate_drift_band(dt_fr, th)
+}
+
+drift_all <- rbindlist(drift_results_list, idcol = "threshold")
+drift_all[, threshold := as.numeric(threshold)]
+drift_all[, ret_net   := ret_gross_lagged - tc_drag - sc_drag - tax_drag]
+
+# Merge the 5bps drift net return into perf_ts_fr for the waterfall overlay
+drift_5bps <- drift_all[threshold == 5, .(eom, ret_net_5bps = ret_net)]
+perf_ts_fr[drift_5bps, on = "eom", ret_net_5bps := i.ret_net_5bps]
+perf_ts_fr[, wealth_net_5bps := cumprod(1 + replace(ret_net_5bps, is.na(ret_net_5bps), 0))]
+
+# --- Drift-band performance summary ---
+summary_drift <- drift_all[, .(
+  Gross_Ret_Ann = mean(ret_gross_lagged) * 12,
+  Gross_Vol_Ann = sd(ret_gross_lagged)   * sqrt(12),
+  Gross_Sharpe  = mean(ret_gross_lagged) / sd(ret_gross_lagged) * sqrt(12),
+  tc_drag_ann   = mean(tc_drag)          * 12,
+  avg_turnover  = mean(turnover),
+  Net_Ret_Ann   = mean(ret_net) * 12,
+  Net_Vol_Ann   = sd(ret_net)   * sqrt(12),
+  Net_Sharpe    = mean(ret_net) / sd(ret_net) * sqrt(12)
+), by = threshold][order(threshold)]
+
+cat("\n=== DRIFT-BAND PERFORMANCE SUMMARY ===\n")
+print(summary_drift[, .(threshold, Gross_Ret_Ann, tc_drag_ann, Net_Ret_Ann,
+                         Gross_Sharpe, Net_Sharpe)])
+
+fwrite(summary_drift, file.path(OUTPUT_TABLE, "drift_band_summary.csv"))
+cat("  Saved: drift_band_summary.csv\n")
+
+# --- Enhanced waterfall plot: frictions + 5bps drift overlay ---
+p10b_waterfall <- ggplot(perf_ts_fr, aes(x = eom)) +
+  geom_ribbon(aes(ymin = wealth_net_tc, ymax = wealth_lagged,
+                  fill = "1. Transaction Costs"), alpha = 0.5) +
+  geom_ribbon(aes(ymin = wealth_net_sc, ymax = wealth_net_tc,
+                  fill = "2. Shorting Costs"),    alpha = 0.5) +
+  geom_ribbon(aes(ymin = wealth_final,  ymax = wealth_net_sc,
+                  fill = "3. Dividend Tax"),       alpha = 0.5) +
+  geom_line(aes(y = wealth_standard, linetype = "Theoretical"), color = "grey60") +
+  geom_line(aes(y = wealth_lagged,   color = "Gross (Lagged)"),   size = 1) +
+  geom_line(aes(y = wealth_final,    color = "Net (0bps Rebal)"), size = 1) +
+  geom_line(aes(y = wealth_net_5bps, color = "Net (5bps Drift)"), size = 1.2) +
+  scale_fill_manual(name = "Friction Layers",
+    values = c("1. Transaction Costs" = "#FDBF6F",
+               "2. Shorting Costs"    = "#FB9A99",
+               "3. Dividend Tax"      = "#CAB2D6")) +
+  scale_color_manual(name = "Performance",
+    values = c("Gross (Lagged)"   = "#1F78B4",
+               "Net (0bps Rebal)" = "black",
+               "Net (5bps Drift)" = "#c8a951")) +
+  scale_linetype_manual(name = "Reference", values = c("Theoretical" = "dashed")) +
+  labs(title = "Strategy Performance: Decomposition of Frictions",
+       subtitle = "Cumulative wealth lost to Frictions, and recovery via 5 bps Drift Band Rebalancing",
+       y = "Wealth Index (Log Scale)", x = "Date") +
+  scale_y_log10(labels = scales::dollar) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+print(p10b_waterfall)
+ggsave(file.path(OUTPUT_FIG, "phase2_frictions_waterfall_drift.png"), p10b_waterfall,
+       width = 9, height = 5, dpi = 150)
+
+# --- Final 4-column performance table ---
+xts_final_4 <- xts(
+  perf_ts_fr[, .(ret_standard, ret_gross_lagged, ret_net_3_tax, ret_net_5bps)],
+  order.by = perf_ts_fr$eom
+)
+colnames(xts_final_4) <- c("Original (T-Close)", "Lagged (T+1)",
+                            "Net (0bps Rebal)",   "Net (5bps Drift)")
+cat("\n=== FINAL STRATEGY METRICS ===\n")
+print(PerformanceAnalytics::table.AnnualizedReturns(xts_final_4, scale = 12))
+
+# --- Plot: Net Sharpe vs threshold ---
+max_point_drift <- summary_drift[which.max(Net_Sharpe)]
+p10b_sharpe <- ggplot(summary_drift, aes(x = threshold, y = Net_Sharpe)) +
+  geom_line(color = "#1a2e5a", linewidth = 1.2) +
+  geom_point(size = 3, color = "#1e50a2") +
+  geom_point(data = max_point_drift, color = "#c8a951", size = 5, shape = 18) +
+  geom_label(aes(label = paste0(threshold, " bps")),
+             vjust = -0.8, size = 3, color = "#1a2e5a",
+             label.size = 0.2, fill = "white") +
+  scale_x_continuous(breaks = THRESHOLDS_BPS) +
+  labs(x = "Drift-band threshold (bps)", y = "Net Sharpe Ratio",
+       title = "Drift-band rebalancing: Net Sharpe vs threshold",
+       subtitle = "CS_LO_25, 12M lookback | 1963–2024") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", color = "#1a2e5a"))
+print(p10b_sharpe)
+ggsave(file.path(OUTPUT_FIG, "drift_sharpe_vs_threshold.png"), p10b_sharpe,
+       width = 7, height = 4, dpi = 150)
+
+# --- Plot: Turnover and TC drag ---
+p10b_to <- summary_drift %>%
+  select(threshold, Turnover = avg_turnover, TC = tc_drag_ann) %>%
+  pivot_longer(cols = c(Turnover, TC), names_to = "Metric", values_to = "Value") %>%
+  mutate(Metric = ifelse(Metric == "Turnover", "Avg monthly turnover", "TC drag (% p.a.)")) %>%
+  ggplot(aes(x = threshold, y = Value, color = Metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = THRESHOLDS_BPS) +
+  scale_color_manual(values = c("Avg monthly turnover" = "#1e50a2",
+                                "TC drag (% p.a.)"     = "#c8a951")) +
+  labs(x = "Drift-band threshold (bps)", y = "Value",
+       title = "Turnover and transaction cost decline with threshold",
+       color = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+print(p10b_to)
+ggsave(file.path(OUTPUT_FIG, "drift_turnover_TC.png"), p10b_to,
+       width = 7, height = 4, dpi = 150)
+
+# --- Plot: Gross vs Net Sharpe trade-off ---
+p10b_tradeoff <- summary_drift %>%
+  select(threshold, Gross_Sharpe, Net_Sharpe) %>%
+  pivot_longer(cols = c(Gross_Sharpe, Net_Sharpe),
+               names_to = "Metric", values_to = "Sharpe") %>%
+  ggplot(aes(x = threshold, y = Sharpe, color = Metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_x_continuous(breaks = THRESHOLDS_BPS) +
+  scale_color_manual(
+    values = c("Gross_Sharpe" = "#1F78B4", "Net_Sharpe" = "#c8a951"),
+    labels = c("Gross Sharpe (Before Fees)", "Net Sharpe (After Fees)")
+  ) +
+  labs(x = "Drift-band threshold (bps)", y = "Annualized Sharpe Ratio",
+       title = "The Drift Band Trap: Alpha Decays Faster Than Costs Drop",
+       subtitle = "Saving on fees is useless if holding 'stale' momentum kills the Gross Alpha",
+       color = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold", color = "#1a2e5a"))
+print(p10b_tradeoff)
+ggsave(file.path(OUTPUT_FIG, "drift_tradeoff_gross_vs_net.png"), p10b_tradeoff,
+       width = 8, height = 5, dpi = 150)
+
+# --- Plot: Cumulative wealth (0 vs 5 bps) with shaded fee drag ---
+compare_thresholds <- c(0, 5)
+setorder(drift_all, threshold, eom)
+wealth_compare <- drift_all[
+  threshold %in% compare_thresholds,
+  .(eom,
+    Gross_Wealth = cumprod(1 + ret_gross_lagged),
+    Net_Wealth   = cumprod(1 + ret_net)),
+  by = threshold
+]
+wealth_compare[, Strategy := paste0(threshold, " bps Drift")]
+wealth_df <- as.data.frame(wealth_compare)
+
+p10b_shaded <- ggplot(wealth_df, aes(x = eom, group = Strategy)) +
+  geom_ribbon(aes(ymin = Net_Wealth, ymax = Gross_Wealth, fill = Strategy),
+              alpha = 0.25) +
+  geom_line(aes(y = Gross_Wealth, color = paste0(Strategy, " (Gross)")),
+            linetype = "dashed", linewidth = 0.8) +
+  geom_line(aes(y = Net_Wealth,   color = paste0(Strategy, " (Net)")),
+            linetype = "solid",  linewidth = 1.2) +
+  scale_y_log10(labels = scales::dollar) +
+  scale_fill_manual(name = "Fee Drag (Shaded Area)",
+    values = c("0 bps Drift" = "#1F78B4", "5 bps Drift" = "#c8a951")) +
+  scale_color_manual(name = "Wealth Lines",
+    values = c("0 bps Drift (Gross)" = "#1F78B4", "0 bps Drift (Net)" = "#1F78B4",
+               "5 bps Drift (Gross)" = "#c8a951", "5 bps Drift (Net)" = "#c8a951")) +
+  labs(x = "Date", y = "Cumulative Wealth (log scale)",
+       title = "The Cost of Stale Signals: Gross vs Net Wealth",
+       caption = "Dashed = Gross Returns | Solid = Net Returns | Shaded Area = Cumulative Frictions") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right",
+        plot.title = element_text(face = "bold", color = "#1a2e5a"),
+        panel.grid.minor = element_blank())
+print(p10b_shaded)
+ggsave(file.path(OUTPUT_FIG, "drift_wealth_gross_vs_net_shaded.png"), p10b_shaded,
+       width = 10, height = 5, dpi = 150)
+
+# --- 0 vs 5 bps metrics table ---
+cat("\n=== PERFORMANCE METRICS: 0 bps vs 5 bps DRIFT BAND ===\n")
+metrics_table_drift <- summary_drift[
+  threshold %in% compare_thresholds,
+  .(Threshold      = paste0(threshold, " bps"),
+    `Gross Ret p.a.`= percent(Gross_Ret_Ann, accuracy = 0.1),
+    `Gross Sharpe`  = round(Gross_Sharpe, 2),
+    `Net Ret p.a.`  = percent(Net_Ret_Ann,   accuracy = 0.1),
+    `Net Sharpe`    = round(Net_Sharpe, 2))
+]
+print(metrics_table_drift, row.names = FALSE)
+cat("======================================================\n\n")
+
+
+# ==============================================================================
+# 10c. INDUSTRY EXPOSURE (FF17)
+# ==============================================================================
+# Maps SIC codes from USA.parquet to Fama-French 17 industries.
+# Shows gross capital allocation across sectors over time.
+# Flags any sector that ever breaches 20% concentration.
+# ==============================================================================
+
+cat("=== SECTION 10c: Industry Exposure (FF17) ===\n")
+
+usa_inds <- read_parquet(USA_FILE, col_select = c("id", "date", "sic")) %>%
+  as.data.table()
+
+# Attach SIC to dt_fr via rolling join
+dt_fr[, sic := usa_inds[dt_fr, on = .(id, date = eom), roll = "nearest", x.sic]]
+
+dt_fr[, ff17 := case_when(
+  sic >= 100  & sic <= 999  ~ "Food",
+  sic >= 1000 & sic <= 1299 ~ "Mines",
+  sic >= 1300 & sic <= 1399 ~ "Oil",
+  sic >= 1400 & sic <= 1499 ~ "Mines",
+  sic >= 1500 & sic <= 1799 ~ "Cnstr",
+  sic >= 2000 & sic <= 2111 ~ "Food",
+  sic >= 2200 & sic <= 2299 ~ "Txtls",
+  sic >= 2300 & sic <= 2399 ~ "Clths",
+  sic >= 2400 & sic <= 2499 ~ "Cnstr",
+  sic >= 2500 & sic <= 2599 ~ "FabPr",
+  sic >= 2600 & sic <= 2799 ~ "Paper",
+  sic >= 2800 & sic <= 2829 ~ "Chems",
+  sic >= 2830 & sic <= 2839 ~ "Drugs",
+  sic >= 2840 & sic <= 2899 ~ "Chems",
+  sic >= 2900 & sic <= 2999 ~ "Oil",
+  sic >= 3000 & sic <= 3099 ~ "Chems",
+  sic >= 3100 & sic <= 3199 ~ "Clths",
+  sic >= 3200 & sic <= 3299 ~ "Cnstr",
+  sic >= 3300 & sic <= 3399 ~ "Steel",
+  sic >= 3400 & sic <= 3499 ~ "FabPr",
+  sic >= 3500 & sic <= 3699 ~ "Machn",
+  sic >= 3700 & sic <= 3719 ~ "Cars",
+  sic >= 3720 & sic <= 3799 ~ "Machn",
+  sic >= 3800 & sic <= 3899 ~ "Machn",
+  sic >= 3900 & sic <= 3999 ~ "Other",
+  sic >= 4000 & sic <= 4899 ~ "Trans",
+  sic >= 4900 & sic <= 4999 ~ "Utils",
+  sic >= 5000 & sic <= 5199 ~ "Other",
+  sic >= 5200 & sic <= 5999 ~ "Rtail",
+  sic >= 6000 & sic <= 6999 ~ "Finan",
+  sic >= 7000 & sic <= 7999 ~ "Other",
+  sic >= 8000 & sic <= 8999 ~ "Other",
+  sic >= 9000 & sic <= 9999 ~ "Other",
+  TRUE                       ~ "Missing"
+)]
+
+ind_exposure <- dt_fr[, .(gross_w = sum(abs(weight), na.rm = TRUE)), by = .(eom, ff17)]
+ind_exposure[, total_gross_month := sum(gross_w), by = eom]
+ind_exposure[, pct_weight := gross_w / total_gross_month]
+
+# Color palette
+high_vis_17 <- c(
+  "#E6194B", "#3CB44B", "#FFE119", "#4363D8", "#F58231",
+  "#911EB4", "#46F0F0", "#F032E6", "#BCF60C", "#FABEBE",
+  "#008080", "#E6BEFF", "#9A6324", "#FFFAC8", "#800000",
+  "#AAFFC3", "#808000"
+)
+n_ind <- length(unique(ind_exposure$ff17))
+final_palette_ind <- colorRampPalette(high_vis_17)(n_ind)
+
+p10c_ind <- ggplot(ind_exposure, aes(x = eom, y = gross_w, fill = ff17)) +
+  geom_area(position = "fill", alpha = 0.9, color = "white", linewidth = 0.1) +
+  scale_fill_manual(values = final_palette_ind) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title    = "Portfolio Industry Composition (FF17)",
+       subtitle = "Gross capital allocation to sectors over time (Scaled to 100%)",
+       x = "Date", y = "Proportion of Gross Portfolio", fill = "Industry") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right", legend.key.size = unit(0.5, "cm"),
+        legend.text = element_text(size = 9),
+        plot.title = element_text(face = "bold", color = "#1a2e5a"),
+        panel.grid.minor = element_blank())
+print(p10c_ind)
+ggsave(file.path(OUTPUT_FIG, "industry_composition_ff17.png"), p10c_ind,
+       width = 10, height = 5, dpi = 150)
+
+# Industry concentration summary
+last_date_ind <- max(ind_exposure$eom)
+ind_summary <- ind_exposure[, .(
+  Avg_Historical_Weight = mean(pct_weight),
+  Max_Historical_Weight = max(pct_weight),
+  Min_Historical_Weight = min(pct_weight),
+  Current_Weight        = pct_weight[eom == last_date_ind][1]
+), by = ff17][order(-Avg_Historical_Weight)]
+
+cat("\n=== INDUSTRY CONCENTRATION SUMMARY ===\n")
+cat("Note: Weights = proportion of total gross capital (Long + Short)\n\n")
+print(ind_summary[, .(
+  Industry           = ff17,
+  `Avg Hist. Weight` = percent(Avg_Historical_Weight, accuracy = 0.1),
+  `Max Hist. Weight` = percent(Max_Historical_Weight, accuracy = 0.1),
+  `Min Hist. Weight` = percent(Min_Historical_Weight, accuracy = 0.1),
+  `Current Weight`   = percent(Current_Weight,        accuracy = 0.1)
+)], row.names = FALSE)
+
+breach_ind <- ind_summary[Max_Historical_Weight > 0.20]
+if (nrow(breach_ind) > 0) {
+  cat("\nWARNING: industries that exceeded 20% concentration at least once:\n")
+  for (i in seq_len(nrow(breach_ind))) {
+    cat(sprintf("   - %s (Max hit %s)\n",
+                breach_ind$ff17[i],
+                percent(breach_ind$Max_Historical_Weight[i], accuracy = 0.1)))
+  }
+}
+cat("======================================\n\n")
+
+
+# ==============================================================================
 # 11. POSITION LIMITING — DECILE VARIANTS
 # ==============================================================================
 # Reduce portfolio breadth by keeping only the most extreme-weight positions.
