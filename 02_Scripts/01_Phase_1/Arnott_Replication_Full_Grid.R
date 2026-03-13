@@ -1451,4 +1451,746 @@ if (!is.null(mkt_metrics)) {
 cat("\n  Outputs saved to:\n")
 cat("    Figures: ", OUTPUT_DIR, "\n")
 cat("    Tables:  ", OUTPUT_TABLE, "\n")
-cat("\n✅ Arnott (2023) Phase 1 Replication Complete!\n")
+cat("\n Arnott (2023) Phase 1 Replication Complete!\n")
+
+
+# ==============================================================================
+# ADDITIONAL EXPLORATORY PLOTS
+# (Adapted from 99_Legacy/Plotting/Plot_Replication_Clean.R)
+#
+# Sections:
+#   15a. Monthly factor returns (prerequisite)
+#   15b. Correlation heatmap of individual factors
+#   15c. Individual factor spaghetti plot
+#   15d. Long vs. Short leg decomposition (LS Median, 1M)
+#   15e. Drawdown analysis
+#   15f. Pre / Post 2000 subperiod comparison
+#   15g. Volatility-scaled factor momentum
+#   15h. Factor cluster analysis (hierarchical)
+#   15i. PCA analysis — systematic vs. idiosyncratic momentum
+# ==============================================================================
+
+# Load corrplot for the correlation heatmap
+if (!requireNamespace("corrplot", quietly = TRUE)) install.packages("corrplot")
+library(corrplot)
+
+
+# ==============================================================================
+# 15a. MONTHLY FACTOR RETURNS
+#      Resample daily factor data to monthly by accumulating geometric returns
+#      within each calendar month.  Used by sections 15b–15i.
+# ==============================================================================
+cat("\n--- 15a. Resampling daily factors to monthly returns ---\n")
+
+monthly_factors <- daily_factors_wide %>%
+  mutate(ym = format(date, "%Y-%m")) %>%
+  group_by(ym) %>%
+  summarise(
+    date = max(date),
+    across(
+      all_of(factor_cols),
+      ~ {
+        vals <- .[!is.na(.)]
+        if (length(vals) == 0) NA_real_ else prod(1 + vals) - 1
+      }
+    ),
+    .groups = "drop"
+  ) %>%
+  arrange(date) %>%
+  select(-ym)
+
+cat(
+  "   Monthly factors:",
+  nrow(monthly_factors), "months x",
+  length(factor_cols), "factors\n"
+)
+
+
+# ==============================================================================
+# 15b. CORRELATION HEATMAP OF INDIVIDUAL FACTORS
+# ==============================================================================
+cat("\n--- 15b. Factor Correlation Heatmap ---\n")
+
+corr_data <- monthly_factors %>%
+  select(all_of(factor_cols)) %>%
+  na.omit()
+
+if (ncol(corr_data) >= 2 && nrow(corr_data) >= 10) {
+  cor_mat    <- cor(corr_data)
+  col_pal_bw <- colorRampPalette(c("#8B4513", "white", "#1E90FF"))(200)
+
+  # Save to PDF
+  pdf(
+    file.path(OUTPUT_DIR, "Arnott_Factor_Correlation_Heatmap.pdf"),
+    width = 14, height = 12
+  )
+  corrplot(
+    cor_mat,
+    method = "color",
+    type   = "upper",
+    order  = "hclust",
+    tl.col = "black",
+    tl.srt = 45,
+    tl.cex = 0.6,
+    col    = col_pal_bw,
+    diag   = FALSE,
+    cl.cex = 0.7,
+    mar    = c(0, 0, 2, 0),
+    title  = "Factor Return Correlation Matrix (Monthly, Hierarchically Ordered)"
+  )
+  dev.off()
+  cat("   Saved: Arnott_Factor_Correlation_Heatmap.pdf\n")
+
+  # Also display inline
+  corrplot(
+    cor_mat,
+    method = "color",
+    type   = "upper",
+    order  = "hclust",
+    tl.col = "black",
+    tl.srt = 45,
+    tl.cex = 0.6,
+    col    = col_pal_bw,
+    diag   = FALSE,
+    cl.cex = 0.7,
+    mar    = c(0, 0, 2, 0),
+    title  = "Factor Return Correlation Matrix (Monthly, Hierarchically Ordered)"
+  )
+}
+
+
+# ==============================================================================
+# 15c. INDIVIDUAL FACTOR SPAGHETTI PLOT
+#      Cumulative wealth of every individual factor, one line each.
+# ==============================================================================
+cat("\n--- 15c. Individual Factor Spaghetti Plot ---\n")
+
+factor_cumulative <- monthly_factors %>%
+  select(date, all_of(factor_cols)) %>%
+  pivot_longer(-date, names_to = "factor_name", values_to = "monthly_ret") %>%
+  filter(!is.na(monthly_ret)) %>%
+  group_by(factor_name) %>%
+  arrange(date) %>%
+  mutate(cum_wealth = cumprod(1 + monthly_ret)) %>%
+  ungroup()
+
+p_spaghetti <- ggplot(
+  factor_cumulative,
+  aes(x = date, y = cum_wealth, group = factor_name)
+) +
+  geom_line(alpha = 0.35, linewidth = 0.4, color = "steelblue") +
+  scale_y_log10(
+    labels = scales::comma_format(accuracy = 0.1),
+    breaks = c(0.1, 0.5, 1, 2, 5, 10, 20, 50)
+  ) +
+  labs(
+    title    = "Cumulative Wealth of All Individual Factors",
+    subtitle = paste0(
+      "Monthly returns (resampled from daily) | Log scale | N = ",
+      length(factor_cols), " factors"
+    ),
+    x       = NULL,
+    y       = "Cumulative Wealth (Start = 1, Log Scale)",
+    caption = "Data: JKP Daily Factors"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14),
+    legend.position  = "none",
+    panel.grid.minor = element_blank()
+  )
+
+print(p_spaghetti)
+ggsave(
+  file.path(OUTPUT_DIR, "Arnott_Factor_Spaghetti.pdf"),
+  plot = p_spaghetti, width = 12, height = 7
+)
+cat("   Saved: Arnott_Factor_Spaghetti.pdf\n")
+
+
+# ==============================================================================
+# 15d. LONG vs. SHORT LEG DECOMPOSITION (LS Median, 1M lookback)
+#      Signal = prior calendar month return; holding = current calendar month.
+#      Short leg is inverted to show its PnL contribution.
+# ==============================================================================
+cat("\n--- 15d. Long vs. Short Leg Decomposition ---\n")
+
+ls_decomp_raw <- monthly_factors %>%
+  select(date, all_of(factor_cols)) %>%
+  arrange(date) %>%
+  mutate(across(all_of(factor_cols), ~ lag(.), .names = "{.col}_lag")) %>%
+  na.omit() %>%
+  rowwise() %>%
+  mutate(
+    sigs      = list(c_across(ends_with("_lag"))),
+    rets      = list(c_across(all_of(factor_cols))),
+    med_sig   = median(unlist(sigs), na.rm = TRUE),
+    long_ret  = {
+      s <- unlist(sigs); r <- unlist(rets)
+      idx <- which(!is.na(s) & s > med_sig)
+      if (length(idx) > 0) mean(r[idx], na.rm = TRUE) else 0
+    },
+    short_ret = {
+      s <- unlist(sigs); r <- unlist(rets)
+      idx <- which(!is.na(s) & s <= med_sig)
+      if (length(idx) > 0) mean(r[idx], na.rm = TRUE) else 0
+    },
+    ls_ret    = long_ret - short_ret
+  ) %>%
+  ungroup() %>%
+  select(date, long_ret, short_ret, ls_ret)
+
+if (nrow(ls_decomp_raw) > 0) {
+  ls_decomp_long <- ls_decomp_raw %>%
+    mutate(short_ret_inv = -short_ret) %>%
+    select(date,
+           "Long Leg"              = long_ret,
+           "Short Leg (inverted)"  = short_ret_inv,
+           "Long\u2013Short"       = ls_ret) %>%
+    pivot_longer(-date, names_to = "Leg", values_to = "ret") %>%
+    group_by(Leg) %>%
+    arrange(date) %>%
+    mutate(cum_wealth = cumprod(1 + ret)) %>%
+    ungroup()
+
+  ls_leg_colors <- c(
+    "Long Leg"             = "#2ca02c",
+    "Short Leg (inverted)" = "#d62728",
+    "Long\u2013Short"      = "#1f77b4"
+  )
+
+  p_ls_decomp <- ggplot(
+    ls_decomp_long,
+    aes(x = date, y = cum_wealth, color = Leg)
+  ) +
+    annotate("rect",
+      xmin = ymd("2000-03-01"), xmax = ymd("2002-10-31"),
+      ymin = 0, ymax = Inf, alpha = 0.07, fill = "gray30"
+    ) +
+    annotate("rect",
+      xmin = ymd("2007-10-01"), xmax = ymd("2009-03-31"),
+      ymin = 0, ymax = Inf, alpha = 0.07, fill = "gray30"
+    ) +
+    annotate("rect",
+      xmin = ymd("2020-02-01"), xmax = ymd("2020-06-30"),
+      ymin = 0, ymax = Inf, alpha = 0.07, fill = "gray30"
+    ) +
+    geom_line(linewidth = 1) +
+    scale_y_log10(
+      labels = scales::comma_format(accuracy = 0.1),
+      breaks = c(0.2, 0.5, 1, 2, 5, 10, 20, 50)
+    ) +
+    scale_color_manual(values = ls_leg_colors) +
+    labs(
+      title    = "Factor Momentum: Long vs. Short Leg Decomposition",
+      subtitle = "LS Median, 1M Lookback | Short leg inverted to show PnL contribution | Shaded = crises",
+      x        = NULL,
+      y        = "Cumulative Wealth (Log Scale)",
+      color    = NULL,
+      caption  = "Data: JKP Daily Factors (monthly resampled) | Excess Returns"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 14),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank()
+    )
+
+  print(p_ls_decomp)
+  ggsave(
+    file.path(OUTPUT_DIR, "Arnott_LS_Decomp_LongShort.pdf"),
+    plot = p_ls_decomp, width = 11, height = 7
+  )
+  cat("   Saved: Arnott_LS_Decomp_LongShort.pdf\n")
+}
+
+
+# ==============================================================================
+# 15e. DRAWDOWN ANALYSIS
+#      Drawdown from peak for the key strategies and benchmarks.
+# ==============================================================================
+cat("\n--- 15e. Drawdown Analysis ---\n")
+
+dd_series_list <- list()
+if ("LS_Median_1M" %in% names(all_grid_results))
+  dd_series_list[["Factor Mom (LS Median 1M)"]]   <- all_grid_results[["LS_Median_1M"]]
+if ("LO_25_1M" %in% names(all_grid_results))
+  dd_series_list[["Factor Mom (LO Top-25% 1M)"]]  <- all_grid_results[["LO_25_1M"]]
+if (!is.null(ind_mom))
+  dd_series_list[["Industry Momentum"]]            <- ind_mom
+if (!is.null(mkt_series))
+  dd_series_list[["Market (Mkt-RF)"]]              <- mkt_series
+
+if (length(dd_series_list) > 0) {
+  dd_df <- imap_dfr(dd_series_list, function(s, nm) {
+    s %>%
+      arrange(date) %>%
+      mutate(
+        cum_wealth = cumprod(1 + period_ret),
+        peak       = cummax(cum_wealth),
+        drawdown   = (cum_wealth - peak) / peak,
+        Series     = nm
+      ) %>%
+      select(date, drawdown, Series)
+  })
+
+  dd_colors <- c(
+    "Factor Mom (LS Median 1M)"   = "#e31a1c",
+    "Factor Mom (LO Top-25% 1M)"  = "#1f78b4",
+    "Industry Momentum"           = "gray50",
+    "Market (Mkt-RF)"             = "black"
+  )
+
+  p_drawdown <- ggplot(dd_df, aes(x = date, y = drawdown, color = Series)) +
+    geom_line(linewidth = 0.7) +
+    scale_y_continuous(
+      labels  = scales::percent_format(accuracy = 1),
+      expand  = expansion(mult = c(0.05, 0))
+    ) +
+    scale_color_manual(
+      values = dd_colors[names(dd_colors) %in% unique(dd_df$Series)]
+    ) +
+    labs(
+      title    = "Drawdown from Peak",
+      subtitle = "LS Median 1M | LO Top-25% 1M | Industry Momentum | Market",
+      x        = NULL,
+      y        = "Drawdown from Peak",
+      color    = NULL,
+      caption  = "Data: JKP Daily Factors & Ken French Data Library"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 14),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank()
+    )
+
+  print(p_drawdown)
+  ggsave(
+    file.path(OUTPUT_DIR, "Arnott_Drawdown_Analysis.pdf"),
+    plot = p_drawdown, width = 11, height = 7
+  )
+  cat("   Saved: Arnott_Drawdown_Analysis.pdf\n")
+}
+
+
+# ==============================================================================
+# 15f. PRE / POST 2000 SUBPERIOD COMPARISON
+# ==============================================================================
+cat("\n--- 15f. Pre/Post 2000 Subperiod Comparison ---\n")
+
+subperiod_series <- list()
+if ("LS_Median_1M" %in% names(all_grid_results))
+  subperiod_series[["Factor Mom (LS Median 1M)"]] <- all_grid_results[["LS_Median_1M"]]
+if (!is.null(ind_mom))
+  subperiod_series[["Industry Momentum"]]          <- ind_mom
+if (!is.null(mkt_series))
+  subperiod_series[["Market (Mkt-RF)"]]            <- mkt_series
+
+if (length(subperiod_series) > 0) {
+  sub_df <- imap_dfr(subperiod_series, function(s, nm) {
+    s %>% mutate(
+      Series = nm,
+      Period = if_else(year(date) < 2000, "Pre-2000", "Post-2000")
+    )
+  })
+
+  sub_cum <- sub_df %>%
+    arrange(Series, Period, date) %>%
+    group_by(Series, Period) %>%
+    mutate(cum_wealth = cumprod(1 + period_ret)) %>%
+    ungroup()
+
+  sub_metrics <- sub_df %>%
+    group_by(Series, Period) %>%
+    summarise(
+      N       = n(),
+      Ann_Ret = (prod(1 + period_ret))^(ANN_FACTOR / n()) - 1,
+      Ann_Vol = sd(period_ret) * sqrt(ANN_FACTOR),
+      Sharpe  = Ann_Ret / Ann_Vol,
+      .groups = "drop"
+    )
+  cat("   Subperiod Metrics:\n")
+  print(sub_metrics)
+
+  sub_colors <- c(
+    "Factor Mom (LS Median 1M)" = "#1565C0",
+    "Industry Momentum"         = "#E53935",
+    "Market (Mkt-RF)"           = "#424242"
+  )
+
+  p_subperiod <- ggplot(sub_cum, aes(x = date, y = cum_wealth, color = Series)) +
+    geom_line(linewidth = 1) +
+    facet_wrap(~Period, scales = "free_x") +
+    scale_y_log10(
+      labels = scales::dollar_format(prefix = "$", accuracy = 0.1)
+    ) +
+    scale_color_manual(
+      values = sub_colors[names(sub_colors) %in% unique(sub_cum$Series)]
+    ) +
+    labs(
+      title    = "Factor Momentum: Pre-2000 vs. Post-2000 Performance",
+      subtitle = "Each panel re-indexed to $1 at period start | Log scale",
+      x        = NULL,
+      y        = "Cumulative Wealth (Log Scale)",
+      color    = NULL,
+      caption  = "Data: JKP Daily Factors & Ken French Data Library | Excess Returns"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 14),
+      legend.position  = "bottom",
+      strip.text       = element_text(face = "bold", size = 12),
+      panel.grid.minor = element_blank()
+    )
+
+  print(p_subperiod)
+  ggsave(
+    file.path(OUTPUT_DIR, "Arnott_Subperiod_Pre_Post_2000.pdf"),
+    plot = p_subperiod, width = 12, height = 7
+  )
+  cat("   Saved: Arnott_Subperiod_Pre_Post_2000.pdf\n")
+}
+
+
+# ==============================================================================
+# 15g. VOLATILITY-SCALED FACTOR MOMENTUM
+#      Scale raw strategy returns to a target annualized volatility using a
+#      rolling realized-vol estimate and a capped leverage multiplier.
+# ==============================================================================
+cat("\n--- 15g. Volatility-Scaled Factor Momentum ---\n")
+
+TARGET_ANN_VOL_15g  <- 0.10  # 10% annualized target
+VOLSCALE_LOOKBACK   <- 12    # periods lookback (in rebalancing units)
+MAX_LEVERAGE        <- 5     # cap leverage at 5x
+
+vol_scale_series <- function(period_rets, target_vol, lookback, max_lev, ann_fac) {
+  rolling_vol <- rollapply(
+    period_rets,
+    width   = lookback,
+    FUN     = sd,
+    na.rm   = TRUE,
+    fill    = NA,
+    align   = "right",
+    partial = max(6, floor(lookback / 2))
+  ) * sqrt(ann_fac)
+  leverage <- lag(pmin(max_lev, target_vol / rolling_vol), 1)
+  leverage[is.na(leverage) | is.infinite(leverage)] <- 1
+  period_rets * leverage
+}
+
+vs_list <- list()
+
+for (key_vs in c("LS_Median_1M", "LO_25_1M")) {
+  if (!(key_vs %in% names(all_grid_results))) next
+  base_s <- all_grid_results[[key_vs]] %>% arrange(date)
+  label_raw    <- paste0(key_vs, " (Raw)")
+  label_scaled <- paste0(key_vs, " (Vol-Scaled)")
+  scaled_rets  <- vol_scale_series(
+    base_s$period_ret,
+    TARGET_ANN_VOL_15g, VOLSCALE_LOOKBACK, MAX_LEVERAGE, ANN_FACTOR
+  )
+  vs_list[[label_raw]]    <- tibble(date = base_s$date, period_ret = base_s$period_ret,  type = label_raw)
+  vs_list[[label_scaled]] <- tibble(date = base_s$date, period_ret = scaled_rets, type = label_scaled) %>%
+    filter(!is.na(period_ret))
+}
+
+if (length(vs_list) > 0) {
+  vs_df <- bind_rows(vs_list) %>%
+    group_by(type) %>%
+    arrange(date) %>%
+    mutate(cum_wealth = cumprod(1 + period_ret)) %>%
+    ungroup()
+
+  vs_colors <- c(
+    "LS_Median_1M (Raw)"         = "#d62728",
+    "LS_Median_1M (Vol-Scaled)"  = "#ff7f0e",
+    "LO_25_1M (Raw)"             = "#1f77b4",
+    "LO_25_1M (Vol-Scaled)"      = "#17becf"
+  )
+
+  p_volscale <- ggplot(vs_df, aes(x = date, y = cum_wealth, color = type)) +
+    geom_line(linewidth = 1) +
+    scale_y_log10(
+      labels = scales::comma_format(accuracy = 0.1),
+      breaks = c(0.5, 1, 2, 5, 10, 20, 50)
+    ) +
+    scale_color_manual(
+      values = vs_colors[names(vs_colors) %in% unique(vs_df$type)]
+    ) +
+    labs(
+      title    = paste0(
+        "Volatility-Scaled Factor Momentum (Target = ",
+        scales::percent(TARGET_ANN_VOL_15g, 1), " Ann. Vol)"
+      ),
+      subtitle = paste0(
+        "Rolling ", VOLSCALE_LOOKBACK, "-period vol estimate | Max leverage ",
+        MAX_LEVERAGE, "x | Log scale"
+      ),
+      x       = NULL,
+      y       = "Cumulative Wealth (Log Scale)",
+      color   = NULL,
+      caption = "Data: JKP Daily Factors | Excess Returns"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 14),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank()
+    )
+
+  print(p_volscale)
+  ggsave(
+    file.path(OUTPUT_DIR, "Arnott_VolScaled_Momentum.pdf"),
+    plot = p_volscale, width = 11, height = 7
+  )
+  cat("   Saved: Arnott_VolScaled_Momentum.pdf\n")
+}
+
+
+# ==============================================================================
+# 15h. FACTOR CLUSTER ANALYSIS
+#      Hierarchical clustering of factors by |correlation| distance (Ward.D2).
+#      Run within-cluster LS Median 1M momentum via existing daily function.
+# ==============================================================================
+cat("\n--- 15h. Factor Cluster Analysis ---\n")
+
+K_CLUSTERS_15h <- 5
+
+clust_input <- monthly_factors %>% select(all_of(factor_cols)) %>% na.omit()
+
+if (nrow(clust_input) >= 20 && ncol(clust_input) >= K_CLUSTERS_15h * 2) {
+  clust_cor  <- cor(clust_input)
+  clust_dist <- as.dist(1 - abs(clust_cor))
+  clust_hc   <- hclust(clust_dist, method = "ward.D2")
+  clust_cut  <- cutree(clust_hc, k = K_CLUSTERS_15h)
+  cluster_map <- split(names(clust_cut), clust_cut)
+  names(cluster_map) <- paste0("Cluster_", seq_len(K_CLUSTERS_15h))
+
+  cat("   Factors per cluster:",
+    paste(names(cluster_map), lengths(cluster_map), sep = "=", collapse = "  "), "\n")
+
+  cluster_mom_list <- imap(cluster_map, function(facs, cname) {
+    facs_ok <- intersect(facs, factor_cols)
+    if (length(facs_ok) < 2) return(NULL)
+    res <- tryCatch(
+      calculate_factor_momentum(
+        df           = daily_factors_wide,
+        factor_cols  = facs_ok,
+        lookback_days = 21,
+        holding_days  = HOLDING_DAYS,
+        impl_lag      = IMPL_LAG,
+        strategy      = "LS_Median"
+      ),
+      error = function(e) NULL
+    )
+    if (!is.null(res)) res %>% mutate(Cluster = cname) else NULL
+  })
+
+  cluster_mom_df <- bind_rows(Filter(Negate(is.null), cluster_mom_list))
+
+  if (nrow(cluster_mom_df) > 0) {
+    cluster_mom_cum <- cluster_mom_df %>%
+      group_by(Cluster) %>%
+      arrange(date) %>%
+      mutate(cum_wealth = cumprod(1 + period_ret)) %>%
+      ungroup()
+
+    p_cluster <- ggplot(
+      cluster_mom_cum,
+      aes(x = date, y = cum_wealth, color = Cluster)
+    ) +
+      geom_line(linewidth = 0.9) +
+      scale_y_log10(
+        labels = scales::comma_format(accuracy = 0.1),
+        breaks = c(0.2, 0.5, 1, 2, 5, 10, 20, 50)
+      ) +
+      labs(
+        title    = "Factor Momentum by Correlation Cluster",
+        subtitle = paste0(
+          K_CLUSTERS_15h, " hierarchical clusters (Ward.D2) | LS Median, 1M lookback | Log scale"
+        ),
+        x       = NULL,
+        y       = "Cumulative Wealth (Log Scale)",
+        color   = NULL,
+        caption = "Data: JKP Daily Factors | Clustering on |1 - corr| distance"
+      ) +
+      theme_minimal(base_size = 13) +
+      theme(
+        plot.title       = element_text(face = "bold", size = 14),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank()
+      )
+
+    print(p_cluster)
+    ggsave(
+      file.path(OUTPUT_DIR, "Arnott_Cluster_Momentum.pdf"),
+      plot = p_cluster, width = 11, height = 7
+    )
+    cat("   Saved: Arnott_Cluster_Momentum.pdf\n")
+
+    cluster_perf <- cluster_mom_df %>%
+      group_by(Cluster) %>%
+      summarise(
+        N       = n(),
+        Ann_Ret = (prod(1 + period_ret))^(ANN_FACTOR / n()) - 1,
+        Ann_Vol = sd(period_ret) * sqrt(ANN_FACTOR),
+        Sharpe  = Ann_Ret / Ann_Vol,
+        .groups = "drop"
+      ) %>%
+      arrange(desc(Sharpe))
+    cat("   Cluster performance (by Sharpe):\n")
+    print(cluster_perf)
+  }
+}
+
+
+# ==============================================================================
+# 15i. PCA ANALYSIS — SYSTEMATIC vs. IDIOSYNCRATIC MOMENTUM
+#      Run PCA on monthly factor returns, scale PC scores to 10% ann vol,
+#      apply median-split momentum on top PCs, compare vs. full strategy.
+# ==============================================================================
+cat("\n--- 15i. PCA Analysis ---\n")
+
+pca_input <- monthly_factors %>%
+  select(date, all_of(factor_cols)) %>%
+  na.omit()
+
+if (nrow(pca_input) >= 36 && ncol(pca_input) >= 4) {
+  pca_mat   <- pca_input %>% select(-date) %>% as.matrix()
+  pca_model <- prcomp(pca_mat, scale. = TRUE)
+
+  var_exp   <- (pca_model$sdev^2) / sum(pca_model$sdev^2)
+  cum_var   <- cumsum(var_exp)
+  n_pcs_80  <- min(which(cum_var >= 0.80))
+  cat("   PCs needed to explain >=80% variance:", n_pcs_80, "\n")
+
+  # --- Scree plot ---
+  scree_df <- tibble(PC = seq_along(var_exp), VarExp = var_exp, CumVar = cum_var)
+
+  p_scree <- ggplot(scree_df %>% head(min(20, nrow(scree_df))), aes(x = PC, y = VarExp)) +
+    geom_col(fill = "#1f78b4", alpha = 0.8) +
+    geom_line(aes(y = CumVar), color = "#e31a1c", linewidth = 1) +
+    geom_point(aes(y = CumVar), color = "#e31a1c", size = 2) +
+    geom_hline(yintercept = 0.80, linetype = "dashed", color = "gray40") +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    labs(
+      title    = "PCA Scree Plot: Factor Return Variance Explained",
+      subtitle = "Bars = individual PC | Red line = cumulative | Dashed = 80% threshold",
+      x        = "Principal Component",
+      y        = "Variance Explained",
+      caption  = "Data: JKP Daily Factors (monthly resampled)"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(plot.title = element_text(face = "bold", size = 14))
+
+  print(p_scree)
+  ggsave(
+    file.path(OUTPUT_DIR, "Arnott_PCA_Scree.pdf"),
+    plot = p_scree, width = 10, height = 6
+  )
+  cat("   Saved: Arnott_PCA_Scree.pdf\n")
+
+  # --- PC returns scaled to 10% ann vol ---
+  target_monthly_sd_pca <- 0.10 / sqrt(12)
+  pc_scores_raw    <- as.data.frame(pca_model$x[, 1:n_pcs_80, drop = FALSE])
+  pc_scores_scaled <- pc_scores_raw %>%
+    mutate(across(everything(), ~ .x * (target_monthly_sd_pca / sd(.x)))) %>%
+    bind_cols(date = pca_input$date, .)
+  pc_cols_pca <- paste0("PC", 1:n_pcs_80)
+
+  # --- Monthly momentum on PC scores (1-month lookback, median split) ---
+  pca_mom_df <- pc_scores_scaled %>%
+    select(date, all_of(pc_cols_pca)) %>%
+    arrange(date) %>%
+    mutate(across(all_of(pc_cols_pca), ~ lag(.), .names = "{.col}_lag")) %>%
+    na.omit() %>%
+    rowwise() %>%
+    mutate(
+      sigs    = list(c_across(ends_with("_lag"))),
+      rets    = list(c_across(all_of(pc_cols_pca))),
+      med     = median(unlist(sigs), na.rm = TRUE),
+      pca_ret = {
+        s <- unlist(sigs); r <- unlist(rets)
+        li <- which(s > med); si <- which(s <= med)
+        (if (length(li) > 0) mean(r[li]) else 0) -
+          (if (length(si) > 0) mean(r[si]) else 0)
+      }
+    ) %>%
+    ungroup() %>%
+    select(date, period_ret = pca_ret)
+
+  # --- Compare PCA mom vs. full LS_Median_1M ---
+  if ("LS_Median_1M" %in% names(all_grid_results) && nrow(pca_mom_df) > 0) {
+    full_mom_pca <- all_grid_results[["LS_Median_1M"]] %>%
+      mutate(ym = format(date, "%Y-%m")) %>%
+      group_by(ym) %>%
+      slice_head(n = 1) %>%
+      ungroup() %>%
+      select(date, period_ret)
+
+    pca_compare <- bind_rows(
+      full_mom_pca %>% mutate(Strategy = "All Factors (LS Median 1M)"),
+      pca_mom_df   %>% mutate(Strategy = paste0("PCA Momentum (Top ", n_pcs_80, " PCs)"))
+    ) %>%
+      group_by(Strategy) %>%
+      arrange(date) %>%
+      mutate(cum_wealth = cumprod(1 + period_ret)) %>%
+      ungroup()
+
+    pca_colors <- setNames(
+      c("#1565C0", "#e65100"),
+      c("All Factors (LS Median 1M)", paste0("PCA Momentum (Top ", n_pcs_80, " PCs)"))
+    )
+
+    p_pca <- ggplot(pca_compare, aes(x = date, y = cum_wealth, color = Strategy)) +
+      geom_line(linewidth = 1) +
+      scale_y_log10(
+        labels = scales::comma_format(accuracy = 0.1),
+        breaks = c(0.5, 1, 2, 5, 10, 20, 50)
+      ) +
+      scale_color_manual(values = pca_colors) +
+      labs(
+        title    = "PCA Momentum vs. Full Factor Momentum",
+        subtitle = paste0(
+          "Top ", n_pcs_80, " PCs explain 80% of factor variance | ",
+          "Monthly median-split | PC scores scaled to 10% ann vol"
+        ),
+        x       = NULL,
+        y       = "Cumulative Wealth (Log Scale)",
+        color   = NULL,
+        caption = "Data: JKP Daily Factors (monthly resampled)"
+      ) +
+      theme_minimal(base_size = 13) +
+      theme(
+        plot.title       = element_text(face = "bold", size = 14),
+        legend.position  = "bottom",
+        panel.grid.minor = element_blank()
+      )
+
+    print(p_pca)
+    ggsave(
+      file.path(OUTPUT_DIR, "Arnott_PCA_Momentum.pdf"),
+      plot = p_pca, width = 11, height = 7
+    )
+    cat("   Saved: Arnott_PCA_Momentum.pdf\n")
+  }
+}
+
+
+# ==============================================================================
+# ADDITIONAL EXPLORATORY PLOTS — SUMMARY
+# ==============================================================================
+cat("\n==============================================================\n")
+cat("  ADDITIONAL EXPLORATORY PLOTS COMPLETE\n")
+cat("  New output files in", OUTPUT_DIR, ":\n")
+cat("    Arnott_Factor_Correlation_Heatmap.pdf\n")
+cat("    Arnott_Factor_Spaghetti.pdf\n")
+cat("    Arnott_LS_Decomp_LongShort.pdf\n")
+cat("    Arnott_Drawdown_Analysis.pdf\n")
+cat("    Arnott_Subperiod_Pre_Post_2000.pdf\n")
+cat("    Arnott_VolScaled_Momentum.pdf\n")
+cat("    Arnott_Cluster_Momentum.pdf\n")
+cat("    Arnott_PCA_Scree.pdf\n")
+cat("    Arnott_PCA_Momentum.pdf\n")
+cat("==============================================================\n")
