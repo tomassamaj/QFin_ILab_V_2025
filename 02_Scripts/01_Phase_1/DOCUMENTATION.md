@@ -9,7 +9,7 @@
 
 | File | Description |
 |---|---|
-| `01_Data/Processed/USA_Valid_Factor_Returns_Daily.parquet` | 36 human-readable JKP factors, daily VW-cap L-S returns |
+| `01_Data/Processed/USA_Valid_Factor_Returns_Daily.parquet` | 36 readable JKP factors, daily VW-cap L-S returns |
 
 Benchmarks downloaded live:
 - `frenchdata::download_french_data("Fama/French 3 Factors [Daily]")` — market factor (Mkt-RF)
@@ -49,7 +49,7 @@ All figures saved to `03_Outputs/Figures/`, table to `03_Outputs/Tables/`.
 |---|---|
 | `Arnott_Grid_Sharpe_Heatmap.pdf` | Sharpe ratio across all 30 strategy×lookback combos |
 | `Arnott_Grid_AnnReturn_Heatmap.pdf` | Annualized return heatmap |
-| `Arnott_Full_Grid_CumWealth.pdf` | Faceted cumulative wealth for all 30 combos |
+| `Arnott_Full_Grid_CumWealth.pdf` | Cumulative wealth for all 30 combos |
 | `Arnott_Top3_vs_Benchmarks.pdf` | Best 3 strategies vs market + industry momentum |
 | `Arnott_LS_vs_LO_Comparison.pdf` | LS vs LO at 1M lookback (all split rules) |
 | `Arnott_Sharpe_BarChart.pdf` | Sharpe bar chart by strategy type and lookback |
@@ -70,7 +70,7 @@ All figures saved to `03_Outputs/Figures/`, table to `03_Outputs/Tables/`.
 | `Arnott_Factor_Spaghetti.pdf` | Individual factor cumulative wealth (all 36) |
 | `Arnott_LS_Decomp_LongShort.pdf` | Long vs short leg decomposition with crisis shading |
 | `Arnott_Drawdown_Analysis.pdf` | Drawdown from peak for key strategies and benchmarks |
-| `Arnott_Subperiod_Pre_Post_2000.pdf` | Pre-2000 vs post-2000 faceted comparison |
+| `Arnott_Subperiod_Pre_Post_2000.pdf` | Pre-2000 vs post-2000 comparison |
 | `Arnott_VolScaled_Momentum.pdf` | Volatility-scaled momentum (target 15% ann vol) |
 | `Arnott_Cluster_Momentum.pdf` | Factor cluster analysis (5 clusters, Ward.D2) |
 | `Arnott_PCA_Scree.pdf` | PCA scree plot (variance explained by component) |
