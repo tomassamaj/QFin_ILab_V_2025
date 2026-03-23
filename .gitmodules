@@ -1,0 +1,3 @@
+[submodule "jkp-data-replication"]
+	path = jkp-data-replication
+	url = git@github.com:tallosfarkas/jkp-data-replication.git

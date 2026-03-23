@@ -27,11 +27,9 @@ Rplots.pdf
 
 # Python / tooling
 .venv/
+jkp-data-replication/.venv/
 __pycache__/
 *.pyc
-
-# jkp-data-replication: Python cluster code, managed separately
-jkp-data-replication/
 
 # Claude Code local config
 .claude/

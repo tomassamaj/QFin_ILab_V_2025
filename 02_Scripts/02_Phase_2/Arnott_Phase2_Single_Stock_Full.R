@@ -1611,7 +1611,7 @@ wrds_user <- Sys.getenv("WRDS_USER")
 wrds_pass <- Sys.getenv("WRDS_PASSWORD")
 RUN_WRDS  <- (wrds_user != "" && wrds_pass != "")
 
-if (RUN_WRDS) {
+if (RUN_WRDS) { tryCatch({
 
   cat("=== SECTION 12: WRDS Enrichment & Liquidity Analysis ===\n")
 
@@ -1819,7 +1819,10 @@ if (RUN_WRDS) {
   )
   cat("  Trade list saved.\n\n")
 
-} else {
+}, error = function(e) {
+  cat("  [12] WRDS connection failed:", conditionMessage(e),
+      "— skipping WRDS enrichment.\n\n")
+}) } else {
   cat("[12] WRDS credentials not found — skipping WRDS enrichment.\n",
       "     Set WRDS_USER and WRDS_PASSWORD env vars to enable.\n\n")
 }
