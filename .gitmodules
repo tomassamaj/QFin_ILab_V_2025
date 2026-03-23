@@ -1,3 +1,6 @@
 [submodule "jkp-data-replication"]
 	path = jkp-data-replication
 	url = git@github.com:tallosfarkas/jkp-data-replication.git
+[submodule "Ilab_Factor_Momentum_APP"]
+	path = Ilab_Factor_Momentum_APP
+	url = git@hf.co:spaces/farkastallos/Ilab_Factor_Momentum
