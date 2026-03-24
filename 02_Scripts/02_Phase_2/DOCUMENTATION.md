@@ -1,7 +1,5 @@
 # Phase 2 R Scripts — Documentation
 
-> Branch: `cleanup2` | Created: 2026-03-13
-
 ## Project Context
 
 Phase 2 translates the factor-level factor momentum strategy (Phase 1) into a
@@ -14,7 +12,7 @@ directly, netting long/short exposures across all active factors for each stock.
 |---|---|
 | `usa_factor_weights.parquet` | 87M rows — stock weights per factor × month-end |
 | `pfs_daily.parquet` | Daily VW-cap portfolio sorts per factor (used for factor signals) |
-| `USA_daily_rets.parquet` / `USA_daily_rets.parquet` | Daily excess stock returns |
+| `USA_daily_rets.parquet` | Daily excess stock returns |
 | `arnott_master.parquet` | Pre-joined file: stock weights + `ret_exc_lead1m` + `ret_day1` |
 | `[usa]_[all_factors]_[monthly]_[vw_cap].csv` | Official JKP monthly factor benchmark |
 
@@ -46,7 +44,6 @@ directly, netting long/short exposures across all active factors for each stock.
 **Data out:**
 - `final_monthly_strategy_weights_1960.parquet` (netted stock positions)
 
-**Status: MEANINGFUL — but uses 21-day rolling signals (NOT Arnott 2023 pure monthly calendar)**
 
 ---
 
@@ -76,7 +73,6 @@ directly, netting long/short exposures across all active factors for each stock.
 - `usa_factor_weights_corrected.parquet`
 - `Bottom_Up_Replication_Report.pdf`, `Audit_Report_All_Factors.pdf`
 
-**Status: HISTORICALLY IMPORTANT — produced the canonical `factors_to_flip` list used across all scripts. Audit part is a one-time validation; daily strategy part is superseded by Python pipeline.**
 
 ---
 
@@ -99,13 +95,11 @@ directly, netting long/short exposures across all active factors for each stock.
 - `factor_sign_corrections.csv`
 - `Daily_to_Monthly_Audit.pdf`
 
-**Status: AUDIT ONLY — One-time validation that daily data compounds correctly to monthly. Not needed for live strategy. The sign corrections are superseded by the hardcoded `factors_to_flip` lists.**
-
 ---
 
 ### 04 — `04_real_world_factor_momentum_implementation.R`
 
-**Role: Large omnibus script — factor-level grid search + single-stock netting + WRDS enrichment + multiple backtests**
+**Role: Large script — factor-level grid search + single-stock netting + WRDS enrichment + multiple backtests**
 
 **What it does (multiple sections):**
 
@@ -130,7 +124,6 @@ directly, netting long/short exposures across all active factors for each stock.
 - `final_strategy_single_stocks.parquet`
 - `final_strategy_single_stocks_enriched.parquet`
 
-**Status: EXPLORATORY — Contains many parallel approaches written during development. The grid search is useful reference. Most of this is superseded by the Python `arnott_phase2_full_grid.py` pipeline and subsequent R scripts.**
 
 ---
 
@@ -157,7 +150,6 @@ directly, netting long/short exposures across all active factors for each stock.
 - `trade_list_detailed_[DATE].csv`
 - `tradeability_score.png`
 
-**Status: EXPLORATORY — Depends on intermediate files from script 04 that may not exist. Useful for investor presentation / due diligence on investability. Not part of core performance pipeline.**
 
 ---
 
@@ -182,7 +174,6 @@ directly, netting long/short exposures across all active factors for each stock.
 - `Liquidity_Analysis.pdf`
 - `tradeable_positions_ranked_[DATE].csv`
 
-**Status: EXPLORATORY — Requires WRDS connection and files from script 05. Useful for capacity / market impact analysis. Not needed for backtest performance.**
 
 ---
 
@@ -211,7 +202,6 @@ directly, netting long/short exposures across all active factors for each stock.
 **Data out:**
 - Charts/plots (in-session only)
 
-**Status: MEANINGFUL — Turnover analysis is critical for frictions estimation. The standard vs. lagged comparison confirms implementation lag impact. The `arnott_master.parquet` backtest is the local version of what the Python pipeline computes on the cluster.**
 
 ---
 
@@ -233,13 +223,11 @@ directly, netting long/short exposures across all active factors for each stock.
 - `arnott_master_dec_ls.parquet` (5%/5% filter)
 - `arnott_master_top5_ls.parquet` (2.5%/2.5% filter)
 
-**Status: PARTIALLY OBSOLETE — Concept is valid (reducing ~3000-stock portfolio to focused best-conviction positions), but the hardcoded Windows path is broken. Also, this approach may be superseded by the `CS_LO_25` strategy variant in the Python pipeline. Would need to be updated to use current file paths.**
-
 ---
 
 ### 09 — `09_Frictions.R`
 
-**Role: Full real-world cost model — THE final performance estimate**
+**Role: Full real-world cost model — the final performance estimate**
 
 **What it does:**
 1. Loads `arnott_master.parquet` (stock weights + `ret_exc_lead1m` + `ret_day1`)
@@ -264,41 +252,6 @@ directly, netting long/short exposures across all active factors for each stock.
 - Plots and `table.AnnualizedReturns` output (in-session only)
 - Also contains start of a "Drift-Band Rebalancing Analysis" section (truncated)
 
-**Status: MOST IMPORTANT for final paper results. This is the canonical frictions model. Results align with memory: CS_LO_50 12M net SR ≈ 0.40, net ret ≈ 2.2%.**
-
 ---
 
-## Summary: What Is Meaningful for the Project
 
-| Script | Meaningful? | Why |
-|---|---|---|
-| 01 | **Yes** | Core backtest pipeline (rolling signal variant) |
-| 02 | **Archive** | One-time audit → produced factors_to_flip |
-| 03 | **Archive** | One-time audit → confirmed daily compounding |
-| 04 | **Archive** | Exploratory omnibus; superseded by Python pipeline |
-| 05 | **Optional** | Useful for investor/presentation tradeability analysis |
-| 06 | **Optional** | Useful for capacity / market impact analysis |
-| 07 | **Yes** | Turnover diagnostics + local backtest validation |
-| 08 | **Fix path, then maybe** | Concept valid but Windows path broken |
-| 09 | **Yes, most important** | Canonical frictions model → final net performance |
-
-## Critical Dependencies Across Scripts
-
-```
-pfs_daily.parquet          → 01, 02 (part B), 03, 04
-usa_factor_weights.parquet → 01, 02 (part A), 04
-arnott_master.parquet      → 07 (part B), 08, 09
-arnott_stock_weights.parquet → 07 (part A)
-USA.parquet                → 09 (me, div1m_me)
-[usa]_[all_factors]_[monthly]_[vw_cap].csv → 02, 03 (benchmark)
-Global_Stock_Returns_Monthly.parquet → 02, 04
-WRDS (live connection)     → 04, 05, 06
-```
-
-## Known Issues
-
-1. **Script 08** has hardcoded Windows path (`C:/WU/...`) — will fail on Mac
-2. **Scripts 05, 06** depend on intermediate outputs from script 04 that may not exist
-3. **factors_to_flip** is copy-pasted across scripts 01, 02 (part B), 04 — inconsistent lists (script 01 has 68 factors; scripts 02/04 have 22). The 22-factor list is from the *audit against the JKP benchmark*; the 68-factor list in script 01 is a broader theoretical list.
-4. **Script 01 uses 21-day rolling signals** (not pure monthly calendar). This inflates Sharpe vs. Arnott (2023) pure methodology.
-5. `USA.parquet` referenced in script 09 is a large raw file separate from the standard processed data — unclear if it exists locally.
